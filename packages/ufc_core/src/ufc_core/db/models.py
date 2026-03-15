@@ -121,3 +121,93 @@ class TapologyEventMatch(Base):
         UniqueConstraint("ufcstats_event_id", "tapology_slug",
                          name="uq_tap_event_match"),
     )
+
+
+class Model(Base):
+    __tablename__ = "model"
+    id = Column(Integer, primary_key=True)
+    short = Column(String(50), nullable=False, unique=True, index=True)
+    family = Column(String(20), nullable=False)             # sklearn|pytorch
+    default_feat_type = Column(String(10), nullable=False)  # 35f|52f
+    description = Column(Text, nullable=True)
+
+
+class ModelVersion(Base):
+    __tablename__ = "model_version"
+    id = Column(Integer, primary_key=True)
+    model_id = Column(Integer, ForeignKey("model.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_idx = Column(Integer, nullable=False)
+    feature_set = Column(String(10), nullable=False)
+    hp_json = Column(JSONB, nullable=True)
+    metrics_json = Column(JSONB, nullable=True)
+    artifact_uri = Column(Text, nullable=False)
+    sagemaker_model_name = Column(String(63), nullable=True)
+    trained_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    was_production = Column(Boolean, nullable=False, default=False)
+    starred = Column(Boolean, nullable=False, default=False)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (UniqueConstraint("model_id", "version_idx", name="uq_model_version_idx"),)
+
+
+class ActiveModel(Base):
+    __tablename__ = "active_model"
+    model_id = Column(Integer, ForeignKey("model.id", ondelete="CASCADE"), primary_key=True)
+    version_id = Column(Integer, ForeignKey("model_version.id"), nullable=False)
+    activated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    sagemaker_target_model = Column(String(255), nullable=True)
+
+
+class TrainingSession(Base):
+    __tablename__ = "training_session"
+    id = Column(Integer, primary_key=True)
+    model_id = Column(Integer, ForeignKey("model.id"), nullable=True)
+    request = Column(JSONB, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    error_msg = Column(Text, nullable=True)
+    result_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=True)
+
+
+class PredictionSession(Base):
+    __tablename__ = "prediction_session"
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("event.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    source = Column(String(20), nullable=False)   # lab_preview|production
+    status = Column(String(20), nullable=False, default="open")
+
+
+class Prediction(Base):
+    __tablename__ = "prediction"
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("prediction_session.id", ondelete="CASCADE"),
+                       nullable=False, index=True)
+    fight_id = Column(Integer, ForeignKey("fight.id"), nullable=False, index=True)
+    model_short = Column(String(50), nullable=False)
+    version_idx = Column(Integer, nullable=False)
+    prob_f1 = Column(Float, nullable=False)
+    prob_f2 = Column(Float, nullable=False)
+    method_pred = Column(String(50), nullable=True)
+    raw_response = Column(JSONB, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "fight_id", "model_short",
+                         name="uq_prediction_session_fight_model"),
+    )
+
+
+class PredictionCache(Base):
+    __tablename__ = "prediction_cache"
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("event.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=False)
+    payload = Column(JSONB, nullable=False)
+    computed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("event_id", "model_version_id", name="uq_prediction_cache_ev_mv"),
+    )
