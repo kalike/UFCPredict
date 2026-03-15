@@ -73,3 +73,51 @@ class FighterRaw(Base):
     scraped_at = Column(DateTime(timezone=True), nullable=False,
                        default=lambda: datetime.now(UTC))
     payload = Column(JSONB, nullable=False)
+
+
+class FightFeatures(Base):
+    __tablename__ = "fight_features"
+    id = Column(Integer, primary_key=True)
+    fight_id = Column(Integer, ForeignKey("fight.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    feature_set = Column(String(10), nullable=False)
+    vector = Column(JSONB, nullable=False)
+    computed_at = Column(DateTime(timezone=True), nullable=False,
+                        default=lambda: datetime.now(UTC))
+    before_event_date = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("fight_id", "feature_set", name="uq_fight_features_set"),
+    )
+
+
+class TapologyPicks(Base):
+    __tablename__ = "tapology_picks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fight_id = Column(Integer, ForeignKey("fight.id", ondelete="CASCADE"),
+                      nullable=False, unique=True, index=True)
+    total_picks = Column(Integer, nullable=False, default=0)
+    fighter_a_id = Column(Integer, ForeignKey("fighter.id"), nullable=False)
+    fighter_b_id = Column(Integer, ForeignKey("fighter.id"), nullable=False)
+    fighter_a_win_pct = Column(Float, nullable=True)
+    fighter_b_win_pct = Column(Float, nullable=True)
+    fighter_a_methods = Column(JSONB, nullable=True)
+    fighter_b_methods = Column(JSONB, nullable=True)
+    matchup_url = Column(Text, nullable=True)
+    source_event_url = Column(Text, nullable=True)
+    scraped_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class TapologyEventMatch(Base):
+    __tablename__ = "tapology_event_match"
+    id = Column(Integer, primary_key=True)
+    ufcstats_event_id = Column(Integer, ForeignKey("event.id", ondelete="CASCADE"),
+                               nullable=False, index=True)
+    tapology_slug = Column(String(255), nullable=False)
+    confidence = Column(Float, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        UniqueConstraint("ufcstats_event_id", "tapology_slug",
+                         name="uq_tap_event_match"),
+    )
