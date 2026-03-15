@@ -210,7 +210,6 @@ def test_compute_features_for_fights_default_arg_works():
     assert df.iloc[0]["tap_has_data"] == 0
 
 
-@pytest.mark.skip(reason="Deferred — depends on ufc_core.tapology (T12)")
 def test_compute_features_for_fights_orients_repo_format():
     """Repo-format entries get oriented based on the fight's fighter_1."""
     from ufc_core.features.engine import compute_features_for_fights
