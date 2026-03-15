@@ -1,7 +1,7 @@
 from datetime import datetime, UTC
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Float, Boolean, ForeignKey,
+    Column, Integer, String, Text, Float, Boolean, Numeric, ForeignKey,
     DateTime, UniqueConstraint, Index,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -211,3 +211,182 @@ class PredictionCache(Base):
     __table_args__ = (
         UniqueConstraint("event_id", "model_version_id", name="uq_prediction_cache_ev_mv"),
     )
+
+
+# ─── Betting ──────────────────────────────────────────
+class User(Base):
+    __tablename__ = "user"
+    id = Column(Integer, primary_key=True)
+    cognito_sub = Column(String(64), nullable=False, unique=True, index=True)
+    email = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class UserBet(Base):
+    __tablename__ = "user_bet"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
+    fight_id = Column(Integer, ForeignKey("fight.id"), nullable=False)
+    stake = Column(Numeric(12, 2), nullable=False)
+    predicted_pick = Column(String(255), nullable=False)
+    odds_taken_american = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="open")
+    placed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class Parlay(Base):
+    __tablename__ = "parlay"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
+    parlay_type = Column(String(10), nullable=False)  # single|double|triple
+    legs = Column(JSONB, nullable=False)
+    stake = Column(Numeric(12, 2), nullable=False)
+    payout = Column(Numeric(12, 2), nullable=True)
+    status = Column(String(20), nullable=False, default="open")
+    placed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    settled_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class BetConfig(Base):
+    __tablename__ = "bet_config"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    params = Column(JSONB, nullable=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_bet_config_user_name"),)
+
+
+class UserPreference(Base):
+    __tablename__ = "user_preference"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
+    key = Column(String(100), nullable=False)
+    value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    __table_args__ = (UniqueConstraint("user_id", "key", name="uq_user_pref"),)
+
+
+class UserViewState(Base):
+    __tablename__ = "user_view_state"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("user.id", ondelete="CASCADE"), nullable=False, index=True)
+    view = Column(String(100), nullable=False)
+    state = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    __table_args__ = (UniqueConstraint("user_id", "view", name="uq_user_view"),)
+
+
+# ─── Lab single-tenant ────────────────────────────────
+class LabPreference(Base):
+    __tablename__ = "lab_preference"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), nullable=False, unique=True)
+    value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class LabBetConfig(Base):
+    __tablename__ = "lab_bet_config"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    params = Column(JSONB, nullable=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+# ─── Experimentacion (solo lab) ───────────────────────
+class HpSearchStudy(Base):
+    __tablename__ = "hp_search_study"
+    id = Column(Integer, primary_key=True)
+    model_short = Column(String(50), nullable=False)
+    feature_set = Column(String(10), nullable=False)
+    feat_type = Column(String(10), nullable=False)
+    dataset = Column(String(20), nullable=False)
+    n_trials = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="running")
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    params = Column(JSONB, nullable=True)
+
+
+class HpSearchTrial(Base):
+    __tablename__ = "hp_search_trial"
+    id = Column(Integer, primary_key=True)
+    study_id = Column(Integer, ForeignKey("hp_search_study.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    trial_idx = Column(Integer, nullable=False)
+    params = Column(JSONB, nullable=False)
+    value = Column(Float, nullable=True)
+    status = Column(String(20), nullable=False, default="running")
+
+
+class ComboSearchStudy(Base):
+    __tablename__ = "combo_search_study"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False, unique=True)
+    status = Column(String(20), nullable=False, default="running")
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    params = Column(JSONB, nullable=True)
+
+
+class ComboSearchTrial(Base):
+    __tablename__ = "combo_search_trial"
+    id = Column(Integer, primary_key=True)
+    study_id = Column(Integer, ForeignKey("combo_search_study.id", ondelete="CASCADE"),
+                     nullable=False, index=True)
+    trial_idx = Column(Integer, nullable=False)
+    params = Column(JSONB, nullable=False)
+    value = Column(Float, nullable=True)
+    status = Column(String(20), nullable=False, default="running")
+
+
+class BacktestRun(Base):
+    __tablename__ = "backtest_run"
+    id = Column(Integer, primary_key=True)
+    strategy = Column(String(100), nullable=False)
+    params = Column(JSONB, nullable=False)
+    roi = Column(Float, nullable=True)
+    sharpe = Column(Float, nullable=True)
+    drawdown = Column(Float, nullable=True)
+    sessions_used = Column(Integer, nullable=True)
+    ran_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+# ─── Observabilidad ───────────────────────────────────
+class ScrapingRun(Base):
+    __tablename__ = "scraping_run"
+    id = Column(Integer, primary_key=True)
+    source = Column(String(20), nullable=False)   # ufcstats|tapology|fotos
+    started_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    new_count = Column(Integer, nullable=False, default=0)
+    updated_count = Column(Integer, nullable=False, default=0)
+    error_msg = Column(Text, nullable=True)
+    recent_event_names = Column(JSONB, nullable=True)
+
+
+class PublishRun(Base):
+    __tablename__ = "publish_run"
+    id = Column(Integer, primary_key=True)
+    model_version_id = Column(Integer, ForeignKey("model_version.id"), nullable=False, index=True)
+    phase = Column(String(20), nullable=False)   # s3|sagemaker|rds_slice
+    status = Column(String(20), nullable=False)
+    payload_hash = Column(String(64), nullable=True)
+    log_excerpt = Column(Text, nullable=True)
+    ran_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class AppLog(Base):
+    __tablename__ = "app_log"
+    id = Column(Integer, primary_key=True)
+    level = Column(String(10), nullable=False)    # debug|info|warn|error
+    module = Column(String(100), nullable=False)
+    message = Column(Text, nullable=False)
+    context = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
