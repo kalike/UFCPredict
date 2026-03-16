@@ -56,3 +56,29 @@ def db_session(test_engine):
         session.close()
         transaction.rollback()
         connection.close()
+
+
+@pytest.fixture
+def db_session_real_commit(test_engine):
+    """Per-test session that performs real commits; truncates all tables after.
+
+    Use this fixture when the test needs data to be visible to independent
+    connections (e.g. CLI code that opens its own session via session_scope).
+    """
+    from ufc_core.db import Base
+    Base.metadata.create_all(test_engine)
+
+    SessionMaker = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
+    session = SessionMaker()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        # Truncate all known tables in reverse dependency order so FK constraints hold.
+        with test_engine.begin() as conn:
+            for tbl in reversed(Base.metadata.sorted_tables):
+                conn.execute(tbl.delete())
