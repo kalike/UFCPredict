@@ -116,6 +116,11 @@ export const api = {
   // predictions
   events: (status?: string) =>
     request<Event[]>(`/predictions/events${status ? `?status=${status}` : ""}`),
+  predict: (eventId: number) =>
+    request<{ session_id: number; event_id: number; event_name: string; predictions: Array<{ fight_id: number; fighter_1: string; fighter_2: string; prob_f1: number; prob_f2: number; contributing_models: string[] }>; notes: string | null }>(
+      `/predictions/event/${eventId}/predict`,
+      { method: "POST" }
+    ),
 
   // fighters
   fighters: (q?: string) =>
