@@ -1,3 +1,9 @@
-from lab_api.routers import combo_search, hp_search, models, publish, scraping, system
+from lab_api.routers import (
+    combo_search, compare, fighters, hp_search, models, predictions,
+    publish, scraping, system,
+)
 
-__all__ = ["combo_search", "hp_search", "models", "publish", "scraping", "system"]
+__all__ = [
+    "combo_search", "compare", "fighters", "hp_search", "models",
+    "predictions", "publish", "scraping", "system",
+]
