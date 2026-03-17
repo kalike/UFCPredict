@@ -7,7 +7,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from lab_api.routers import system
+from lab_api.routers import publish, scraping, system
 
 # Prevent OpenMP segfault when PyTorch and LightGBM both load libomp on macOS
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -35,6 +35,8 @@ app.add_middleware(
 )
 
 app.include_router(system.router)
+app.include_router(scraping.router)
+app.include_router(publish.router)
 
 
 def run():

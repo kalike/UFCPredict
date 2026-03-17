@@ -1,3 +1,3 @@
-from lab_api.routers import system
+from lab_api.routers import publish, scraping, system
 
-__all__ = ["system"]
+__all__ = ["publish", "scraping", "system"]
