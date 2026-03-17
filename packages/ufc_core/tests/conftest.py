@@ -1,8 +1,16 @@
 import os
 
 # Fix 1: Set env var BEFORE any ufc_core import can happen at collection time.
-TEST_DB_NAME = os.environ.get("UFC_LAB_TEST_DB_NAME", "ufc_lab_test")
-os.environ["UFC_LAB_DB_NAME"] = TEST_DB_NAME
+# Honours root conftest's UFC_LAB_DB_NAME if already set (monorepo combined run).
+# Fallback chain: UFC_CORE_TEST_DB_NAME > UFC_LAB_TEST_DB_NAME > ufc_lab_test.
+if not os.environ.get("UFC_LAB_DB_NAME"):
+    TEST_DB_NAME = os.environ.get(
+        "UFC_CORE_TEST_DB_NAME",
+        os.environ.get("UFC_LAB_TEST_DB_NAME", "ufc_lab_test"),
+    )
+    os.environ["UFC_LAB_DB_NAME"] = TEST_DB_NAME
+else:
+    TEST_DB_NAME = os.environ["UFC_LAB_DB_NAME"]
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -21,22 +29,46 @@ def _admin_url():
 
 @pytest.fixture(scope="session")
 def test_engine():
-    """Ensure a clean ufc_lab_test database and return an engine bound to it."""
-    admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
-    with admin.connect() as c:
-        c.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME}"))
-        c.execute(text(f"CREATE DATABASE {TEST_DB_NAME}"))
-    admin.dispose()
+    """Ensure a clean test database and return an engine bound to it.
+
+    In monorepo combined runs (pytest packages/ufc_core/tests/ apps/lab-api/tests/),
+    the root conftest.py's autouse test_engine already creates the DB; this
+    fixture reuses the existing DB without dropping/recreating it.
+    """
+    # Check if the DB already exists (created by root conftest or a prior run).
+    try:
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            result = c.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :n"),
+                {"n": TEST_DB_NAME},
+            )
+            db_exists = result.fetchone() is not None
+        admin.dispose()
+    except Exception:
+        db_exists = False
+
+    if not db_exists:
+        # Solo run: create the DB ourselves.
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME}"))
+            c.execute(text(f"CREATE DATABASE {TEST_DB_NAME}"))
+        admin.dispose()
 
     from ufc_core.db.engine import engine
+    from ufc_core.db.base import Base
+    import ufc_core.db.models  # noqa: F401
+    Base.metadata.create_all(engine)
     yield engine
-    engine.dispose()
 
-    # Teardown: drop the test DB so parallel/repeated runs are clean.
-    admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
-    with admin.connect() as c:
-        c.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME}"))
-    admin.dispose()
+    if not db_exists:
+        # Solo run: tear down.
+        engine.dispose()
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {TEST_DB_NAME}"))
+        admin.dispose()
 
 
 # Fix 2: SAVEPOINT-based db_session rollback — immune to inner commits.

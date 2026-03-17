@@ -1,8 +1,9 @@
 import os
 
 # Set env vars BEFORE any ufc_core import can happen at collection time.
-os.environ.setdefault("UFC_LAB_DB_NAME", "ufc_lab_test")
-os.environ["UFC_LAB_DB_NAME"] = os.environ.get("UFC_LAB_DB_NAME", "ufc_lab_test")
+# Honours root conftest's UFC_LAB_DB_NAME if already set (monorepo combined run).
+_LAB_DB = os.environ.get("UFC_LAB_DB_NAME") or os.environ.get("LAB_API_TEST_DB_NAME", "ufc_lab_test")
+os.environ["UFC_LAB_DB_NAME"] = _LAB_DB
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -21,13 +22,33 @@ def _admin_url():
 
 @pytest.fixture(scope="session", autouse=True)
 def test_engine():
-    """Ensure a clean ufc_lab_test database exists with all tables created."""
-    db_name = os.environ["UFC_LAB_DB_NAME"]
-    admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
-    with admin.connect() as c:
-        c.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
-        c.execute(text(f"CREATE DATABASE {db_name}"))
-    admin.dispose()
+    """Ensure a clean test database exists with all tables created.
+
+    In monorepo combined runs, the root conftest.py autouse test_engine has
+    already created the DB; this fixture detects that and reuses it.
+    """
+    db_name = _LAB_DB
+
+    # Check if DB already exists (root conftest may have created it).
+    try:
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            result = c.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :n"),
+                {"n": db_name},
+            )
+            db_exists = result.fetchone() is not None
+        admin.dispose()
+    except Exception:
+        db_exists = False
+
+    if not db_exists:
+        # Solo run: create the DB.
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
+            c.execute(text(f"CREATE DATABASE {db_name}"))
+        admin.dispose()
 
     from ufc_core.db.engine import engine
     from ufc_core.db.base import Base
@@ -35,13 +56,14 @@ def test_engine():
     import ufc_core.db.models  # noqa: F401
     Base.metadata.create_all(engine)
     yield engine
-    engine.dispose()
 
-    # Teardown
-    admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
-    with admin.connect() as c:
-        c.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
-    admin.dispose()
+    if not db_exists:
+        # Solo run: tear down.
+        engine.dispose()
+        admin = create_engine(_admin_url(), isolation_level="AUTOCOMMIT")
+        with admin.connect() as c:
+            c.execute(text(f"DROP DATABASE IF EXISTS {db_name}"))
+        admin.dispose()
 
 
 @pytest.fixture
