@@ -171,14 +171,17 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
         })
         fight_id_map[len(fight_inputs) - 1] = f
 
+    # Strip timezone so comparisons with event_dates (naive) don't raise TypeError.
+    ev_date_naive = ev.date.replace(tzinfo=None) if ev.date else None
+
     feats_df, _ = compute_features_for_fights(
         fights=fight_inputs,
         fighter_histories=ds.fighter_histories,
         fighter_lookup=ds.fighter_lookup,
         event_dates=ds.event_dates,
         base_elo=1500.0,
-        event_date=ev.date,
-        before_event_date=ev.date,
+        event_date=ev_date_naive,
+        before_event_date=ev_date_naive,
     )
 
     if len(feats_df) == 0:
