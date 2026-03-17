@@ -7,7 +7,10 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from lab_api.routers import models as models_router, publish, scraping, system
+from lab_api.routers import (
+    combo_search, hp_search, models as models_router,
+    publish, scraping, system,
+)
 
 # Prevent OpenMP segfault when PyTorch and LightGBM both load libomp on macOS
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -38,6 +41,8 @@ app.include_router(system.router)
 app.include_router(scraping.router)
 app.include_router(publish.router)
 app.include_router(models_router.router)
+app.include_router(hp_search.router)
+app.include_router(combo_search.router)
 
 
 def run():
