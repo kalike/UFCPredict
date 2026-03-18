@@ -1,11 +1,8 @@
-"""HP search router — Optuna queue (stub).
+"""HP search router — Optuna real worker.
 
-F2 stub: records HpSearchStudy/Trial rows in DB but does not actually
-run Optuna trials. The API surface matches what the UI expects so the
-end-to-end flow renders correctly; the worker is wired later.
+Kicks off a background Optuna study (LGBM / XGB supported in first pass).
+Other families return started=False with a message.
 """
-
-from datetime import datetime, UTC
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -13,6 +10,7 @@ from sqlalchemy.orm import Session
 from ufc_core.db import models as db_models
 
 from lab_api.deps import get_db
+from lab_api.services import hp_search as hp_svc
 
 router = APIRouter(prefix="/api/hp-search", tags=["hp_search"])
 
@@ -53,16 +51,35 @@ def start_search(req: HpSearchRequest, db: Session = Depends(get_db)) -> HpStart
         feat_type=req.feat_type,
         dataset=req.dataset,
         n_trials=req.n_trials,
-        status="running",
+        status="queued",
         params=req.params,
     )
     db.add(study)
     db.commit()
-    # TODO: kick off real Optuna worker here. For F2 stub, immediately mark as completed.
-    study.status = "completed_stub"
-    study.finished_at = datetime.now(UTC)
-    db.commit()
+    result = hp_svc.start_hp_search(req.model_dump(), study.id)
+    if not result["started"]:
+        # Mark queued study as rejected so it doesn't sit in 'queued' forever
+        study.status = "rejected"
+        db.commit()
+        return HpStartResponse(started=False, study_id=study.id, message=result.get("message"))
     return HpStartResponse(started=True, study_id=study.id)
+
+
+class HpRunStatus(BaseModel):
+    is_running: bool
+    study_id: int | None = None
+    model_short: str | None = None
+    completed_trials: int = 0
+    best_value: float | None = None
+    step: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
+@router.get("/status", response_model=HpRunStatus)
+def status() -> HpRunStatus:
+    return HpRunStatus(**hp_svc.get_status())
 
 
 @router.get("/studies", response_model=list[HpStudySummary])

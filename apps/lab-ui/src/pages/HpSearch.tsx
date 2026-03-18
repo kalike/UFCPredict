@@ -8,22 +8,54 @@ export default function HpSearchPage() {
   const [short, setShort] = useState("");
   const [nTrials, setNTrials] = useState("50");
   const studies = useQuery({ queryKey: ["hp-studies"], queryFn: api.hpStudies });
+  const status = useQuery({
+    queryKey: ["hp-status"],
+    queryFn: api.hpStatus,
+    refetchInterval: (q) => (q.state.data?.is_running ? 1000 : 5000),
+  });
   const start = useMutation({
     mutationFn: () => api.hpStart({ model_short: short, n_trials: Number(nTrials) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["hp-studies"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["hp-studies"] });
+      qc.invalidateQueries({ queryKey: ["hp-status"] });
+    },
   });
 
   return (
     <div>
-      <PageHeader title="HP Search" subtitle="Optuna · queue + studies (worker stub)" />
-      <div className="grid grid-cols-[300px_1fr] gap-4">
+      <PageHeader title="HP Search" subtitle="Optuna · LGBM / XGB" />
+      <div className="grid grid-cols-[300px_280px_1fr] gap-4">
         <Card>
           <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Nueva busqueda</h3>
           <div className="space-y-3">
             <Input placeholder="model_short" value={short} onChange={(e) => setShort(e.target.value)} />
             <Input placeholder="n_trials" type="number" value={nTrials} onChange={(e) => setNTrials(e.target.value)} />
             <Button onClick={() => start.mutate()} disabled={!short}>Lanzar</Button>
+            {start.data && !start.data.started && (
+              <p className="text-xs text-red-400">{start.data.message ?? "No se pudo iniciar"}</p>
+            )}
           </div>
+        </Card>
+        <Card>
+          <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Estado actual</h3>
+          {status.data?.is_running ? (
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Model</span><span className="font-mono">{status.data.model_short}</span></div>
+              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Trials</span><span className="font-mono">{status.data.completed_trials}</span></div>
+              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Best</span><span className="font-mono">{status.data.best_value?.toFixed(4) ?? "—"}</span></div>
+              <div className="text-xs text-[var(--color-muted)]">{status.data.step ?? "—"}</div>
+            </div>
+          ) : (
+            <div className="space-y-2 text-sm">
+              <p className="text-[var(--color-muted)]">Idle.</p>
+              {status.data?.step && (
+                <div className="text-xs text-[var(--color-muted)] font-mono">{status.data.step}</div>
+              )}
+              {status.data?.best_value != null && (
+                <div className="flex justify-between"><span className="text-[var(--color-muted)]">Last best</span><span className="font-mono">{status.data.best_value.toFixed(4)}</span></div>
+              )}
+            </div>
+          )}
         </Card>
         <Card>
           <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Studies</h3>
@@ -38,7 +70,7 @@ export default function HpSearchPage() {
                   <td>{s.model_short}</td>
                   <td><Badge tone="muted">{s.feature_set}</Badge></td>
                   <td className="font-mono">{s.n_trials}</td>
-                  <td><Badge tone={s.status === "completed_stub" ? "gold" : "accent"}>{s.status}</Badge></td>
+                  <td><Badge tone={s.status === "completed" ? "accent" : s.status === "running" ? "gold" : "muted"}>{s.status}</Badge></td>
                   <td className="text-xs text-[var(--color-muted)] font-mono">{s.started_at.slice(0, 16)}</td>
                 </tr>
               ))}
