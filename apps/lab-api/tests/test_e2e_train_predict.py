@@ -521,3 +521,43 @@ def test_e2e_train_svm_base(client, test_engine):
         f"SVMb failed: step={final.get('step')} err={final.get('error')}"
     )
     assert final.get("result_version_id") is not None
+
+
+def _seed_synthetic_data(db) -> None:
+    """Seed minimal synthetic data if the DB is empty (helper for standalone tests)."""
+    seeder = _Seeder(db)
+    seeder.seed_fighters()
+    seeder.seed_events()
+    seeder.attach_fighter_raw()
+
+
+def test_e2e_train_deep_mlp(client, test_engine):
+    """DeepMLP via PyTorch wrapper — confirms torch path trains + persists."""
+    Base.metadata.create_all(test_engine)
+    db = SessionLocal()
+    try:
+        if db.query(db_models.Model).filter_by(short="Deep").one_or_none() is None:
+            db.add(db_models.Model(
+                short="Deep", family="pytorch",
+                default_feat_type="35f", description="Test DeepMLP",
+            ))
+            db.commit()
+        from sqlalchemy import select
+        if db.execute(select(db_models.Event).limit(1)).first() is None:
+            _seed_synthetic_data(db)
+    finally:
+        db.close()
+
+    r = client.post(
+        "/api/models/train",
+        json={"model_short": "Deep", "feature_set": "v7", "dataset": "since2010"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is True
+
+    final = _wait_idle(client, timeout_seconds=240)
+    assert not final["is_running"], f"Deep did not finish: {final}"
+    assert "failed" not in (final.get("step") or "").lower(), (
+        f"Deep failed: step={final.get('step')} err={final.get('error')}"
+    )
+    assert final.get("result_version_id") is not None

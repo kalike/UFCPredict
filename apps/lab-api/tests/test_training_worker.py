@@ -33,7 +33,8 @@ def test_training_unsupported_model_marks_not_implemented(client, test_engine):
     finally:
         db.close()
 
-    r = client.post("/api/models/train", json={"model_short": "Deep"})
+    # "UNSUPPORTED_XYZ123" is not in SUPPORTED; it should trigger not_implemented.
+    r = client.post("/api/models/train", json={"model_short": "UNSUPPORTED_XYZ123"})
     assert r.status_code == 200
 
     # Poll for completion (the job runs in a daemon thread)

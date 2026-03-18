@@ -46,6 +46,9 @@ SUPPORTED: dict[str, str] = {
     "SVMb":  "sklearn.svm.SVC",
     "SVMg":  "sklearn.svm.SVC (GridSearchCV)",
     "SVMr":  "sklearn.svm.SVC (RobustScaler)",
+    # PyTorch neural nets
+    "Deep":  "ufc_core.models.pytorch_arch.DeepMLP",
+    "RNet":  "ufc_core.models.pytorch_arch.TabularResNet",
 }
 
 
@@ -160,6 +163,12 @@ def _build_classifier(family_key: str, feature_set: str = ""):
                 probability=True, random_state=42,
             )),
         ])
+    if family_key == "Deep":
+        from lab_api.services.torch_wrap import make_deep_mlp
+        return make_deep_mlp(epochs=40, batch_size=64, lr=1e-3)
+    if family_key == "RNet":
+        from lab_api.services.torch_wrap import make_resnet
+        return make_resnet(epochs=40, batch_size=64, lr=1e-3, hidden_dim=128, n_blocks=3)
     raise ValueError(f"No builder for family_key={family_key}")
 
 
