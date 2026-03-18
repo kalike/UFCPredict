@@ -67,7 +67,6 @@ def start_scrape(letters: str | None = None) -> StartResponse:
         from ufc_core.db.engine import SessionLocal
         from ufc_core.db.ingest import ingest_fighters_payload
         from ufc_core.scrapers.ufcstats import process_letter_incremental
-
         from string import ascii_lowercase
 
         target = (
@@ -78,7 +77,7 @@ def start_scrape(letters: str | None = None) -> StartResponse:
         try:
             db: Session = SessionLocal()
             try:
-                # Build existing index from current DB state (by url).
+                # ── 1. UFCStats incremental ────────────────────────────
                 existing_index = {
                     f.ufcstats_url: f.record or ""
                     for f in db.query(db_models.Fighter).all()
@@ -97,22 +96,133 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                     _state["step"] = f"ingesting {len(all_payload)} fighters"
                 counts = ingest_fighters_payload(db, all_payload)
 
-                # Audit row
+                # ── 2. Compute event names touched ─────────────────────
+                # Tapology hook receives a list of event names that may need
+                # community picks. We collect every event referenced by the
+                # newly ingested fighters' fight histories.
+                event_names: set[str] = set()
+                for fighter in all_payload:
+                    for fight in fighter.get("fights", []):
+                        ev = fight.get("event")
+                        if ev:
+                            event_names.add(ev)
+
+                # ── 3. Tapology hook (best-effort) ─────────────────────
+                tap_summary: dict | None = None
+                if event_names:
+                    with _lock:
+                        _state["step"] = f"tapology hook for {len(event_names)} events"
+                    try:
+                        import asyncio
+                        from ufc_core.tapology import tapology_hook_for_event_names
+                        tap_summary = asyncio.run(
+                            tapology_hook_for_event_names(event_names)
+                        )
+                        logger.info("tapology hook summary: %s", tap_summary)
+                    except Exception as tap_exc:
+                        logger.exception("tapology hook failed (non-fatal)")
+                        tap_summary = {"error": repr(tap_exc)}
+
+                # ── 4. Materialize fight_features (v7) ─────────────────
+                # Iterate only over events we just touched. For each, compute
+                # features for all its fights and upsert into fight_features.
+                feat_count = 0
+                if event_names:
+                    with _lock:
+                        _state["step"] = "materializing fight_features (v7)"
+                    try:
+                        from ufc_core.data_loader import DataStoreDB
+                        from ufc_core.features.engine import compute_features_for_fights
+                        from ufc_core.features.store import upsert_fight_features
+                        from ufc_core.tapology.picks_repo import build_picks_lookup_by_event_pair
+
+                        ds = DataStoreDB()
+                        ds.load()
+
+                        picks_lookup = build_picks_lookup_by_event_pair(db)
+
+                        for ev_name in event_names:
+                            ev_row = (
+                                db.query(db_models.Event).filter_by(name=ev_name).one_or_none()
+                            )
+                            if ev_row is None:
+                                continue
+                            fights = (
+                                db.query(db_models.Fight)
+                                  .filter_by(event_id=ev_row.id).all()
+                            )
+                            fight_inputs = []
+                            fight_id_for_row: dict[tuple, int] = {}
+                            for f in fights:
+                                f1 = db.query(db_models.Fighter).filter_by(id=f.fighter_1_id).one()
+                                f2 = db.query(db_models.Fighter).filter_by(id=f.fighter_2_id).one()
+                                fight_inputs.append({
+                                    "event": ev_name,
+                                    "fighter_1": f1.name,
+                                    "fighter_2": f2.name,
+                                    "result": (
+                                        1 if f.result == "win" else 0 if f.result == "loss" else None
+                                    ),
+                                    "odds_f1_american": f.odds_f1_american,
+                                    "odds_f2_american": f.odds_f2_american,
+                                })
+                                fight_id_for_row[(ev_name, frozenset({f1.name, f2.name}))] = f.id
+
+                            if not fight_inputs:
+                                continue
+
+                            df, _ = compute_features_for_fights(
+                                fights=fight_inputs,
+                                fighter_histories=ds.fighter_histories,
+                                fighter_lookup=ds.fighter_lookup,
+                                event_dates=ds.event_dates,
+                                base_elo=1500.0,
+                                event_date=ev_row.date,
+                                before_event_date=ev_row.date,
+                                tapology_picks_by_key=picks_lookup,
+                            )
+
+                            META = {"result", "event_date", "fighter_1", "fighter_2", "event"}
+                            for _, row in df.iterrows():
+                                key = (ev_name, frozenset({row.get("fighter_1"), row.get("fighter_2")}))
+                                fid = fight_id_for_row.get(key)
+                                if fid is None:
+                                    continue
+                                vec = {k: float(v) for k, v in row.items()
+                                       if k not in META and isinstance(v, (int, float))
+                                       and v == v}  # exclude NaN
+                                upsert_fight_features(
+                                    db, fid, "v7", vec, before_event_date=ev_row.date,
+                                )
+                                feat_count += 1
+                        db.commit()
+                    except Exception as feat_exc:
+                        logger.exception("feature store materialization failed (non-fatal)")
+
+                # ── 5. Audit row ───────────────────────────────────────
                 run = db_models.ScrapingRun(
                     source="ufcstats",
                     finished_at=datetime.now(UTC),
                     new_count=counts["fighters_new"],
                     updated_count=counts["fighters_updated"],
                     error_msg=None,
+                    recent_event_names=sorted(event_names) if event_names else None,
                 )
-                db.add(run)
-                db.commit()
+                db.add(run); db.commit()
 
                 with _lock:
                     _state.update({
                         "is_running": False,
                         "finished_at": datetime.now(UTC).isoformat(),
-                        "step": "done", "counts": counts,
+                        "step": (
+                            f"done · scraped={len(all_payload)} · events={len(event_names)} "
+                            f"· tap={(tap_summary or {}).get('matched', 0)} · feats={feat_count}"
+                        ),
+                        "counts": {
+                            **counts,
+                            "events_touched": len(event_names),
+                            "fight_features_upserted": feat_count,
+                        },
                     })
             finally:
                 db.close()

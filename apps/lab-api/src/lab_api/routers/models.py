@@ -103,6 +103,7 @@ def activate_version(short: str, version_idx: int, db: Session = Depends(get_db)
         ModelRegistry(db).set_active(short, version_idx)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    db.commit()
     return {"ok": True, "short": short, "version_idx": version_idx}
 
 
@@ -112,6 +113,7 @@ def disable_model(short: str, db: Session = Depends(get_db)) -> dict:
         ModelRegistry(db).disable(short)
     except KeyError:
         raise HTTPException(404, f"Model '{short}' not registered")
+    db.commit()
     return {"ok": True, "short": short}
 
 

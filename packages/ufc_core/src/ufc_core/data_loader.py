@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ufc_core.db.engine import SessionLocal as SyncSessionLocal
-from ufc_core.db.models import Event, Fighter
+from ufc_core.db.models import Event, Fighter, FighterRaw
 from ufc_core.data_loader_base import BaseDataStore
 from ufc_core.features.engine import build_fighter_histories
 from ufc_core.parsers import american_to_decimal
@@ -48,31 +48,62 @@ class DataStoreDB(BaseDataStore):
     # ------------------------------------------------------------------
 
     def _load_fighters(self, db: Session) -> None:
-        """Load all fighters from the ``fighter`` table."""
+        """Load all fighters from the ``fighter`` table.
+
+        When a ``fighter_raw`` payload exists for a fighter (written by
+        ingest_fighters_payload after scraping), we use it as the primary
+        source so that full fight history is available for feature engineering.
+        Otherwise we fall back to the basic Fighter table columns.
+        """
         rows = db.execute(select(Fighter).order_by(Fighter.name)).scalars().all()
+
+        # Build a map: fighter_id → latest raw payload (if any).
+        # Only load the latest row per fighter to keep memory bounded.
+        latest_raw: dict[int, dict] = {}
+        raw_rows = (
+            db.execute(
+                select(FighterRaw)
+                .order_by(FighterRaw.fighter_id, FighterRaw.scraped_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        for rr in raw_rows:
+            if rr.fighter_id not in latest_raw and isinstance(rr.payload, dict):
+                latest_raw[rr.fighter_id] = rr.payload
 
         self.fighters_raw = []
         self.fighter_lookup = {}
         for f in rows:
-            # ufc_core Fighter has no raw_data/stats/url/sex/num_fights fields;
-            # build a minimal dict from the columns that do exist.
-            fdict = {
-                "name": f.name,
-                "record": f.record or "",
-                "sex": None,
-                "stats": {
-                    "Stance": f.stance or "",
-                    "Height": str(f.height_cm) if f.height_cm else "",
-                    "Reach": str(f.reach_cm) if f.reach_cm else "",
-                },
-                "url": f.ufcstats_url or "",
-                "fights": [],
-                "num_fights": 0,
-            }
+            payload = latest_raw.get(f.id)
+            if payload and "fights" in payload:
+                # Full payload from scraper: use as-is, only override name to
+                # keep canonical casing from the fighter table.
+                fdict = dict(payload)
+                fdict["name"] = f.name
+            else:
+                # Fallback: minimal dict from fighter table columns (no history).
+                fdict = {
+                    "name": f.name,
+                    "record": f.record or "",
+                    "sex": None,
+                    "stats": {
+                        "Stance": f.stance or "",
+                        "Height": str(f.height_cm) if f.height_cm else "",
+                        "Reach": str(f.reach_cm) if f.reach_cm else "",
+                    },
+                    "url": f.ufcstats_url or "",
+                    "fights": [],
+                    "num_fights": 0,
+                }
             self.fighters_raw.append(fdict)
             self.fighter_lookup[f.name] = fdict
 
-        logger.info(f"  DB -> {len(self.fighters_raw)} fighters loaded")
+        logger.info(
+            "  DB -> %d fighters loaded (%d with raw payload)",
+            len(self.fighters_raw),
+            len(latest_raw),
+        )
 
     def _load_event_dates(self, db: Session) -> None:
         """Load events from the ``event`` table -> event_dates + event_locations."""

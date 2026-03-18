@@ -15,19 +15,19 @@ UFC_LAB_DB_USER=ufc UFC_LAB_DB_PASS=ufc_secret lab-api
 
 lab-api escucha en :8101.
 
-## Routers (estado F2 MVP)
+## Routers (estado F2 maduro)
 
 | Router | Endpoints clave | Estado |
 |---|---|---|
 | `system` | /api/system/health, /registry | ✅ |
-| `scraping` | /api/scraping/{start,status,runs} | ✅ (UFCStats → DB, sin JSON) |
+| `models` | /api/models, /train, versions activate/mark/delete | ✅ training real (LGBM/XGB/LR), otros stub |
+| `predictions` | /api/predictions/events, /event/{id}/predict, /cache/{id} | ✅ inference ensemble simple |
+| `scraping` | /api/scraping/{start,status,runs} | ✅ + tapology hook + materialización features automáticos |
 | `publish` | /api/publish/dry-run, /runs | ✅ (CLI wrapper, real run en F4) |
-| `models` | /api/models, /train, versions activate/mark/delete | ✅ (training stub) |
 | `hp-search` | /api/hp-search/start, studies, trials | ✅ (worker stub) |
 | `combo-search` | /api/combo-search/start, studies, trials | ✅ (worker stub) |
 | `fighters` | /api/fighters list + detail | ✅ |
 | `compare` | /api/compare?a=&b= | ✅ |
-| `predictions` | /api/predictions/events, /cache/{event_id} | ✅ (sin inference real) |
 
 ## Tests
 
@@ -43,12 +43,11 @@ UFC_LAB_DB_USER=ufc UFC_LAB_DB_PASS=ufc_secret \
 pytest packages/ufc_core/tests/ apps/lab-api/tests/
 ```
 
-## Pendiente (post-F2)
+## Pendiente (post-F2 maduro)
 
-- Worker real de training (integra `ufc_core.trainer.core`)
 - Worker real de HP search (Optuna)
 - Worker real de combo search
-- Endpoint predict-future con inference de ensemble + TTA
+- Training para modelos restantes (RF, SVM, MLP, Deep, RNet, Ens3)
+- TTA + weighted ensemble en inference
 - Recalculation router
 - WebSockets para HP/combo monitoring (UI live updates)
-- Lab UI (apps/lab-ui/) — siguiente sub-fase de F2
