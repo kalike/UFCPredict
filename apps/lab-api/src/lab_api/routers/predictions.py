@@ -111,10 +111,18 @@ def _load_artifact(uri: str) -> dict:
 
 @router.post("/event/{event_id}/predict", response_model=PredictionRunResponse)
 def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRunResponse:
-    """Run inference against all active models for every fight in this event.
+    """Run inference against all active models with TTA + weighted ensemble.
+
+    TTA (Test-Time Augmentation): each fight is predicted twice — once in
+    normal order and once with fighter_1 / fighter_2 swapped.  The TTA
+    probability for fighter_1 is ``(p_normal + (1 - p_swapped)) / 2``.
+
+    Weighted ensemble: each model is weighted by its ``metrics_json.accuracy``
+    (falls back to 1.0 if the field is absent).  Weights are normalised to
+    sum to 1 before aggregation.
 
     Idempotent-ish: each call creates a new prediction_session row and writes
-    one prediction row per (model, fight). The latest cache row per
+    one prediction row per (model, fight).  The latest cache row per
     (event_id, model_version_id) is overwritten with the new payload.
     """
     ev = db.query(db_models.Event).filter_by(id=event_id).one_or_none()
@@ -135,7 +143,7 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
     if not active_rows:
         raise HTTPException(400, "No active models registered. Train and activate at least one first.")
 
-    versions: list[tuple[db_models.Model, db_models.ModelVersion, dict]] = []
+    versions: list[tuple[db_models.Model, db_models.ModelVersion, dict, float]] = []
     skipped: list[str] = []
     for am in active_rows:
         m = db.query(db_models.Model).filter_by(id=am.model_id).one()
@@ -145,20 +153,29 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
         except Exception as e:
             skipped.append(f"{m.short}: {e!r}")
             continue
-        versions.append((m, v, art))
+        weight = 1.0
+        if v.metrics_json and isinstance(v.metrics_json, dict):
+            weight = float(v.metrics_json.get("accuracy", 1.0) or 1.0)
+        versions.append((m, v, art, weight))
 
     if not versions:
         raise HTTPException(400, f"No loadable active models. Skipped: {skipped}")
 
-    # Build feature inputs for this event's fights
+    # Normalize weights so they sum to 1
+    total_w = sum(entry[3] for entry in versions) or 1.0
+    weights = [entry[3] / total_w for entry in versions]
+
+    # Build feature inputs for this event's fights (normal + swapped)
     from ufc_core.data_loader import DataStoreDB
     from ufc_core.features.engine import compute_features_for_fights
 
     ds = DataStoreDB()
     ds.load()
 
-    fight_inputs = []
+    fight_inputs: list[dict] = []
+    fight_inputs_swapped: list[dict] = []
     fight_id_map: dict[int, db_models.Fight] = {}
+    fighter_names: list[tuple[str, str]] = []
     for f in fights:
         f1 = db.query(db_models.Fighter).filter_by(id=f.fighter_1_id).one()
         f2 = db.query(db_models.Fighter).filter_by(id=f.fighter_2_id).one()
@@ -169,12 +186,20 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
             "odds_f1_american": f.odds_f1_american,
             "odds_f2_american": f.odds_f2_american,
         })
+        fight_inputs_swapped.append({
+            "event": ev.name,
+            "fighter_1": f2.name,
+            "fighter_2": f1.name,
+            "odds_f1_american": f.odds_f2_american,
+            "odds_f2_american": f.odds_f1_american,
+        })
         fight_id_map[len(fight_inputs) - 1] = f
+        fighter_names.append((f1.name, f2.name))
 
     # Strip timezone so comparisons with event_dates (naive) don't raise TypeError.
     ev_date_naive = ev.date.replace(tzinfo=None) if ev.date else None
 
-    feats_df, _ = compute_features_for_fights(
+    feats_normal, _ = compute_features_for_fights(
         fights=fight_inputs,
         fighter_histories=ds.fighter_histories,
         fighter_lookup=ds.fighter_lookup,
@@ -183,8 +208,17 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
         event_date=ev_date_naive,
         before_event_date=ev_date_naive,
     )
+    feats_swapped, _ = compute_features_for_fights(
+        fights=fight_inputs_swapped,
+        fighter_histories=ds.fighter_histories,
+        fighter_lookup=ds.fighter_lookup,
+        event_dates=ds.event_dates,
+        base_elo=1500.0,
+        event_date=ev_date_naive,
+        before_event_date=ev_date_naive,
+    )
 
-    if len(feats_df) == 0:
+    if len(feats_normal) == 0:
         raise HTTPException(
             400,
             "Feature computation produced no rows (one or both fighters lack history). "
@@ -198,28 +232,35 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
     db.add(sess)
     db.flush()
 
-    # For each (model, version), run inference and aggregate.
-    per_fight_probs: dict[int, list[tuple[str, float, float]]] = {
-        i: [] for i in range(len(fight_inputs))
-    }
-    for m, v, art in versions:
+    # For each (model, version), run TTA inference and collect weighted probs.
+    # per_fight_probs[i] = [(model_short, p_tta_f1, weight), ...]
+    per_fight_probs: list[list[tuple[str, float, float]]] = [[] for _ in fight_inputs]
+    for (m, v, art, _raw_w), w in zip(versions, weights):
         clf = art["clf"]
         feat_cols = art["feat_cols"]
-        # Some artifacts may lack a feat_col present at training; fill with 0.0
-        missing = [c for c in feat_cols if c not in feats_df.columns]
-        for c in missing:
-            feats_df[c] = 0.0
-        X = feats_df[feat_cols].values
+        # Fill columns missing in the current feature frame with 0.0
+        for c in feat_cols:
+            if c not in feats_normal.columns:
+                feats_normal[c] = 0.0
+            if c not in feats_swapped.columns:
+                feats_swapped[c] = 0.0
+        X_n = feats_normal[feat_cols].values
+        X_s = feats_swapped[feat_cols].values
         try:
-            probs = clf.predict_proba(X)
-            p_f1 = probs[:, 1].astype(float)
+            p_n = clf.predict_proba(X_n)[:, 1].astype(float)
+            p_s = clf.predict_proba(X_s)[:, 1].astype(float)
         except Exception:
-            preds = clf.predict(X)
-            p_f1 = preds.astype(float)
-        for i in range(len(feats_df)):
-            p1 = float(p_f1[i])
+            p_n = clf.predict(X_n).astype(float)
+            p_s = clf.predict(X_s).astype(float)
+
+        # TTA: average of (normal P(f1 wins), 1 - swapped P(f1 wins))
+        p_tta = (p_n + (1.0 - p_s)) / 2.0
+        p_tta = np.clip(p_tta, 0.0, 1.0)
+
+        for i in range(len(feats_normal)):
+            p1 = float(p_tta[i])
             p2 = 1.0 - p1
-            per_fight_probs[i].append((m.short, p1, p2))
+            per_fight_probs[i].append((m.short, p1, w))
 
             # Persist per-model prediction row
             db.add(db_models.Prediction(
@@ -230,22 +271,28 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
                 prob_f1=p1,
                 prob_f2=p2,
                 method_pred=None,
-                raw_response={"prob_f1": p1, "prob_f2": p2},
+                raw_response={
+                    "prob_f1": p1,
+                    "prob_f2": p2,
+                    "tta": {"normal": float(p_n[i]), "swapped": float(p_s[i])},
+                    "weight": w,
+                },
             ))
 
-    # Aggregate (simple mean) + assemble response
+    # Aggregate (weighted mean) + assemble response
     out: list[FightPrediction] = []
     cache_payload = {"event_id": ev.id, "predictions": []}
     for i in range(len(fight_inputs)):
         rows_i = per_fight_probs[i]
         if not rows_i:
             continue
-        p1 = sum(r[1] for r in rows_i) / len(rows_i)
+        total_w_local = sum(r[2] for r in rows_i) or 1.0
+        p1 = sum(r[1] * r[2] for r in rows_i) / total_w_local
         p2 = 1.0 - p1
         fp = FightPrediction(
             fight_id=fight_id_map[i].id,
-            fighter_1=fight_inputs[i]["fighter_1"],
-            fighter_2=fight_inputs[i]["fighter_2"],
+            fighter_1=fighter_names[i][0],
+            fighter_2=fighter_names[i][1],
             prob_f1=float(p1),
             prob_f2=float(p2),
             contributing_models=[r[0] for r in rows_i],
@@ -254,7 +301,7 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
         cache_payload["predictions"].append(fp.model_dump())
 
     # Persist cache: one row per active version, with same aggregate payload.
-    for m, v, _art in versions:
+    for m, v, _art, _w in versions:
         existing_cache = (
             db.query(db_models.PredictionCache)
               .filter_by(event_id=ev.id, model_version_id=v.id)
