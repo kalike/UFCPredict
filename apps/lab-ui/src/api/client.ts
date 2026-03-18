@@ -146,4 +146,17 @@ export const api = {
     request<{ rc: number; plan_text: string }>(
       "/publish/dry-run", { method: "POST", body: JSON.stringify(body) }
     ),
+
+  // recalculation
+  recalcRun: (event_ids?: number[]) =>
+    request<{ started: boolean; message: string | null }>("/recalculation/run", {
+      method: "POST",
+      body: JSON.stringify({ event_ids: event_ids ?? null }),
+    }),
+  recalcStatus: () => request<{
+    is_running: boolean; started_at: string | null; finished_at: string | null;
+    total_events: number; completed_events: number; skipped_events: number;
+    step: string | null; error: string | null;
+  }>("/recalculation/status"),
+  recalcRuns: () => request<Array<{ session_id: number; event_id: number; event_name: string; created_at: string }>>("/recalculation/runs"),
 };

@@ -11,6 +11,7 @@ import PredictionsPage from "./pages/Predictions";
 import FightersPage from "./pages/Fighters";
 import ComparePage from "./pages/Compare";
 import PublishPage from "./pages/Publish";
+import RecalculationPage from "./pages/Recalculation";
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
         <Route path="/fighters" element={<FightersPage />} />
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/publish" element={<PublishPage />} />
+        <Route path="/recalculation" element={<RecalculationPage />} />
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Route>
     </Routes>
