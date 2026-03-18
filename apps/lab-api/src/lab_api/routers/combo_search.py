@@ -1,7 +1,6 @@
-"""Combo search router — exhaustive combinations of model versions (stub).
+"""Combo search router — exhaustive combinations of model versions.
 
-F2 stub: records ComboSearchStudy/Trial rows in DB but does not actually
-evaluate combinations. The worker integration comes later.
+F3: real worker integration replacing the completed_stub approach.
 """
 
 from datetime import datetime, UTC
@@ -12,6 +11,7 @@ from sqlalchemy.orm import Session
 from ufc_core.db import models as db_models
 
 from lab_api.deps import get_db
+from lab_api.services import combo_search as combo_svc
 
 router = APIRouter(prefix="/api/combo-search", tags=["combo_search"])
 
@@ -36,23 +36,40 @@ class ComboStudySummary(BaseModel):
     params: dict | None
 
 
+class ComboRunStatus(BaseModel):
+    is_running: bool
+    study_id: int | None = None
+    evaluated: int = 0
+    total: int = 0
+    best_value: float | None = None
+    best_shorts: list[str] | None = None
+    step: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+
+
 @router.post("/start", response_model=ComboStartResponse)
 def start_combo(req: ComboSearchRequest, db: Session = Depends(get_db)) -> ComboStartResponse:
-    # Uniqueness check
     existing = db.query(db_models.ComboSearchStudy).filter_by(name=req.name).one_or_none()
     if existing is not None:
         return ComboStartResponse(started=False, message=f"Study '{req.name}' already exists")
-
     study = db_models.ComboSearchStudy(
-        name=req.name, status="running", params=req.params,
+        name=req.name, status="queued", params=req.params,
     )
     db.add(study)
     db.commit()
-    # TODO: kick off real combo worker. For F2 stub, mark as completed immediately.
-    study.status = "completed_stub"
-    study.finished_at = datetime.now(UTC)
-    db.commit()
+    result = combo_svc.start_combo_search(req.params or {}, study.id)
+    if not result["started"]:
+        study.status = "rejected"
+        db.commit()
+        return ComboStartResponse(started=False, study_id=study.id, message=result.get("message"))
     return ComboStartResponse(started=True, study_id=study.id)
+
+
+@router.get("/status", response_model=ComboRunStatus)
+def status() -> ComboRunStatus:
+    return ComboRunStatus(**combo_svc.get_status())
 
 
 @router.get("/studies", response_model=list[ComboStudySummary])

@@ -117,6 +117,11 @@ export const api = {
       "/combo-search/start", { method: "POST", body: JSON.stringify(body) }
     ),
   comboStudies: () => request<ComboStudy[]>("/combo-search/studies"),
+  comboStatus: () => request<{
+    is_running: boolean; study_id: number | null; evaluated: number; total: number;
+    best_value: number | null; best_shorts: string[] | null; step: string | null;
+    started_at: string | null; finished_at: string | null; error: string | null;
+  }>("/combo-search/status"),
 
   // predictions
   events: (status?: string) =>
