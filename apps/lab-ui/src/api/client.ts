@@ -105,6 +105,11 @@ export const api = {
       "/hp-search/start", { method: "POST", body: JSON.stringify(body) }
     ),
   hpStudies: () => request<HpStudy[]>("/hp-search/studies"),
+  hpStatus: () => request<{
+    is_running: boolean; study_id: number | null; model_short: string | null;
+    completed_trials: number; best_value: number | null; step: string | null;
+    started_at: string | null; finished_at: string | null; error: string | null;
+  }>("/hp-search/status"),
 
   // combo-search
   comboStart: (body: { name: string }) =>
@@ -112,6 +117,11 @@ export const api = {
       "/combo-search/start", { method: "POST", body: JSON.stringify(body) }
     ),
   comboStudies: () => request<ComboStudy[]>("/combo-search/studies"),
+  comboStatus: () => request<{
+    is_running: boolean; study_id: number | null; evaluated: number; total: number;
+    best_value: number | null; best_shorts: string[] | null; step: string | null;
+    started_at: string | null; finished_at: string | null; error: string | null;
+  }>("/combo-search/status"),
 
   // predictions
   events: (status?: string) =>

@@ -531,6 +531,53 @@ def _seed_synthetic_data(db) -> None:
     seeder.attach_fighter_raw()
 
 
+def test_e2e_hp_search_lgbm(client, test_engine):
+    """Run 2 Optuna trials on LGBM against the synthetic dataset."""
+    Base.metadata.create_all(test_engine)
+    db = SessionLocal()
+    try:
+        if db.query(db_models.Model).filter_by(short="LGBM").one_or_none() is None:
+            db.add(db_models.Model(short="LGBM", family="sklearn",
+                                  default_feat_type="35f", description="Test LGBM"))
+            db.commit()
+        from sqlalchemy import select
+        if db.execute(select(db_models.Event).limit(1)).first() is None:
+            _seed_synthetic_data(db)
+    finally:
+        db.close()
+
+    r = client.post("/api/hp-search/start", json={
+        "model_short": "LGBM", "n_trials": 2, "feature_set": "v7",
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is True
+    study_id = body["study_id"]
+
+    # Poll status
+    import time as _t
+    deadline = _t.time() + 120
+    while _t.time() < deadline:
+        s = client.get("/api/hp-search/status").json()
+        if not s["is_running"]:
+            break
+        _t.sleep(0.5)
+    final = client.get("/api/hp-search/status").json()
+    assert final["is_running"] is False, f"HP search did not finish: {final}"
+    assert "failed" not in (final.get("step") or "").lower(), final
+
+    # Check trials persisted
+    db = SessionLocal()
+    try:
+        trials = db.query(db_models.HpSearchTrial).filter_by(study_id=study_id).all()
+        assert len(trials) == 2, f"Expected 2 trials, got {len(trials)}"
+        for t in trials:
+            assert t.value is not None
+            assert "n_estimators" in t.params
+    finally:
+        db.close()
+
+
 def test_e2e_train_deep_mlp(client, test_engine):
     """DeepMLP via PyTorch wrapper — confirms torch path trains + persists."""
     Base.metadata.create_all(test_engine)
