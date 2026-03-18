@@ -42,6 +42,10 @@ SUPPORTED: dict[str, str] = {
     "MLP":   "sklearn.neural_network.MLPClassifier",
     "MLP2":  "sklearn.neural_network.MLPClassifier",
     "ML52":  "sklearn.neural_network.MLPClassifier",
+    # SVM family
+    "SVMb":  "sklearn.svm.SVC",
+    "SVMg":  "sklearn.svm.SVC (GridSearchCV)",
+    "SVMr":  "sklearn.svm.SVC (RobustScaler)",
 }
 
 
@@ -124,6 +128,36 @@ def _build_classifier(family_key: str, feature_set: str = ""):
                 max_iter=300, early_stopping=True,
                 validation_fraction=0.1, n_iter_no_change=20,
                 random_state=42,
+            )),
+        ])
+    if family_key in ("SVMb", "SVMg", "SVMr"):
+        from sklearn.impute import SimpleImputer
+        from sklearn.svm import SVC
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler, RobustScaler
+
+        scaler = RobustScaler() if family_key == "SVMr" else StandardScaler()
+
+        if family_key == "SVMg":
+            from sklearn.model_selection import GridSearchCV
+            base_svc = SVC(kernel="rbf", probability=True, random_state=42)
+            # Small grid; n_jobs=1 because GridSearchCV+SVC parallelism is tricky.
+            grid = GridSearchCV(
+                base_svc,
+                param_grid={"C": [0.5, 1.0, 4.0], "gamma": ["scale", 0.05]},
+                cv=3, n_jobs=1, scoring="accuracy",
+            )
+            return Pipeline([
+                ("imp", SimpleImputer(strategy="median")),
+                ("scale", scaler),
+                ("svm", grid),
+            ])
+        return Pipeline([
+            ("imp", SimpleImputer(strategy="median")),
+            ("scale", scaler),
+            ("svm", SVC(
+                C=1.0, kernel="rbf", gamma="scale",
+                probability=True, random_state=42,
             )),
         ])
     raise ValueError(f"No builder for family_key={family_key}")

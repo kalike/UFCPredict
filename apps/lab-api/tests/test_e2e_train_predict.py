@@ -481,3 +481,43 @@ def test_e2e_train_rf_and_mlp(client, test_engine):
         assert final.get("result_version_id") is not None, (
             f"{short} trained but no version_id. step={final.get('step')} err={final.get('error')}"
         )
+
+
+def test_e2e_train_svm_base(client, test_engine):
+    """SVMb on a tiny dataset — confirms the Pipeline (imp+scale+SVC) trains."""
+    Base.metadata.create_all(test_engine)
+    db = SessionLocal()
+    try:
+        if db.query(db_models.Model).filter_by(short="SVMb").one_or_none() is None:
+            db.add(db_models.Model(
+                short="SVMb", family="sklearn",
+                default_feat_type="35f", description="Test SVM Base",
+            ))
+            db.commit()
+        # Seed only if no E2E fighters are present
+        existing = (
+            db.query(db_models.Fighter)
+            .filter(db_models.Fighter.name.like(f"{_Seeder.PREFIX}%"))
+            .first()
+        )
+        if existing is None:
+            seeder = _Seeder(db)
+            seeder.seed_fighters()
+            seeder.seed_events()
+            seeder.attach_fighter_raw()
+    finally:
+        db.close()
+
+    r = client.post(
+        "/api/models/train",
+        json={"model_short": "SVMb", "feature_set": "v7", "dataset": "since2010"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] is True
+
+    final = _wait_idle(client, timeout_seconds=180)  # SVM slower than LGBM
+    assert not final["is_running"], f"SVMb did not finish: {final}"
+    assert "failed" not in (final.get("step") or "").lower(), (
+        f"SVMb failed: step={final.get('step')} err={final.get('error')}"
+    )
+    assert final.get("result_version_id") is not None
