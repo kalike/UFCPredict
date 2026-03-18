@@ -24,12 +24,24 @@ logger = logging.getLogger("lab-api.training")
 # Supported model_shorts in F2 maduro. Extend this set as more families are
 # wired.  Each entry maps to the python import path for documentation purposes.
 SUPPORTED: dict[str, str] = {
+    # Boosters
     "LGBM":  "lightgbm.LGBMClassifier",
     "LG52":  "lightgbm.LGBMClassifier",
     "XGB":   "xgboost.XGBClassifier",
     "XG52":  "xgboost.XGBClassifier",
+    "CB":    "catboost.CatBoostClassifier",
+    "CB52":  "catboost.CatBoostClassifier",
+    # Linear
     "LR":    "sklearn.linear_model.LogisticRegression",
     "LR52":  "sklearn.linear_model.LogisticRegression",
+    # Trees
+    "RF35":  "sklearn.ensemble.RandomForestClassifier",
+    "RFda":  "sklearn.ensemble.RandomForestClassifier",
+    "RF52":  "sklearn.ensemble.RandomForestClassifier",
+    # Neural nets (sklearn)
+    "MLP":   "sklearn.neural_network.MLPClassifier",
+    "MLP2":  "sklearn.neural_network.MLPClassifier",
+    "ML52":  "sklearn.neural_network.MLPClassifier",
 }
 
 
@@ -50,27 +62,71 @@ def get_status() -> dict:
         return dict(_state)
 
 
-def _build_classifier(model_short: str):
-    """Return an unfitted classifier for the given model_short."""
-    if model_short in ("LGBM", "LG52"):
+def _build_classifier(family_key: str, feature_set: str = ""):
+    """Return an unfitted classifier (or sklearn Pipeline) for the given family.
+
+    MLP variants are wrapped in a Pipeline with StandardScaler so the network
+    sees normalised inputs (parity with the legacy backend behaviour).
+    """
+    if family_key in ("LGBM", "LG52"):
         from lightgbm import LGBMClassifier
         return LGBMClassifier(
             n_estimators=400, learning_rate=0.05, num_leaves=31,
             min_child_samples=20, n_jobs=-1, verbose=-1,
         )
-    if model_short in ("XGB", "XG52"):
+    if family_key in ("XGB", "XG52"):
         from xgboost import XGBClassifier
         return XGBClassifier(
             n_estimators=400, learning_rate=0.05, max_depth=6,
             n_jobs=-1, eval_metric="logloss", verbosity=0,
         )
-    if model_short in ("LR", "LR52"):
-        from sklearn.linear_model import LogisticRegression
-        return LogisticRegression(
-            C=1.0, penalty="elasticnet", l1_ratio=0.5,
-            solver="saga", max_iter=2000, n_jobs=-1,
+    if family_key in ("CB", "CB52"):
+        from catboost import CatBoostClassifier
+        return CatBoostClassifier(
+            iterations=400, depth=6, learning_rate=0.05,
+            verbose=False, allow_writing_files=False,
         )
-    raise ValueError(f"No builder for model_short={model_short}")
+    if family_key in ("LR", "LR52"):
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        # Impute NaNs first; then scale; ElasticNet via saga.
+        return Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("lr", LogisticRegression(
+                C=1.0, penalty="elasticnet", l1_ratio=0.5,
+                solver="saga", max_iter=4000, n_jobs=-1,
+            )),
+        ])
+    if family_key in ("RF35", "RFda", "RF52"):
+        from sklearn.ensemble import RandomForestClassifier
+        return RandomForestClassifier(
+            n_estimators=400, max_depth=None, min_samples_split=5,
+            min_samples_leaf=2, n_jobs=-1, random_state=42,
+        )
+    if family_key in ("MLP", "MLP2", "ML52"):
+        from sklearn.impute import SimpleImputer
+        from sklearn.neural_network import MLPClassifier
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        hidden_layer_sizes = (
+            (64,) if family_key in ("MLP2", "ML52") else (128, 64)
+        )
+        return Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("mlp", MLPClassifier(
+                hidden_layer_sizes=hidden_layer_sizes,
+                activation="relu", solver="adam",
+                alpha=1e-4, learning_rate_init=1e-3,
+                max_iter=300, early_stopping=True,
+                validation_fraction=0.1, n_iter_no_change=20,
+                random_state=42,
+            )),
+        ])
+    raise ValueError(f"No builder for family_key={family_key}")
 
 
 def _build_dataset_simple(ds, since_year: int):
@@ -275,7 +331,7 @@ def start_training(req: dict) -> dict:
             # --- Step 4: Train ---
             with _lock:
                 _state["step"] = f"training {model_short} ({SUPPORTED[model_short]})"
-            clf = _build_classifier(model_short)
+            clf = _build_classifier(model_short, feature_set)
             clf.fit(X_train, y_train)
 
             # --- Step 5: Evaluate ---

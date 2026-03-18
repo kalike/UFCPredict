@@ -429,3 +429,55 @@ def test_e2e_train_lgbm_then_predict_event(client, test_engine):
         assert "LGBM" in pred["contributing_models"], (
             f"LGBM not in contributing_models: {pred['contributing_models']}"
         )
+
+
+def test_e2e_train_rf_and_mlp(client, test_engine):
+    """Confirm RF35 and MLP can be trained on the same synthetic dataset.
+
+    Reuses the seed from the LGBM e2e — synthetic data is idempotent so
+    re-seeding produces the same rows (or skips if already present).
+    """
+    Base.metadata.create_all(test_engine)
+
+    db = SessionLocal()
+    seeder = _Seeder(db)
+    try:
+        # Register the two model families if not present
+        for short, family in [("RF35", "sklearn"), ("MLP", "sklearn")]:
+            if db.query(db_models.Model).filter_by(short=short).one_or_none() is None:
+                db.add(db_models.Model(
+                    short=short, family=family,
+                    default_feat_type="35f",
+                    description=f"Test {short}",
+                ))
+        db.commit()
+
+        # Seed only if no E2E fighters are present (previous test already seeded)
+        existing = (
+            db.query(db_models.Fighter)
+            .filter(db_models.Fighter.name.like(f"{_Seeder.PREFIX}%"))
+            .first()
+        )
+        if existing is None:
+            seeder.seed_fighters()
+            seeder.seed_events()
+            seeder.attach_fighter_raw()
+    finally:
+        db.close()
+
+    for short in ("RF35", "MLP"):
+        r = client.post(
+            "/api/models/train",
+            json={"model_short": short, "feature_set": "v7", "dataset": "since2010"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["started"] is True
+
+        final = _wait_idle(client, timeout_seconds=90)
+        assert not final["is_running"], f"Training for {short} did not finish: {final}"
+        assert "failed" not in (final.get("step") or "").lower(), (
+            f"Training for {short} failed: {final}"
+        )
+        assert final.get("result_version_id") is not None, (
+            f"{short} trained but no version_id. step={final.get('step')} err={final.get('error')}"
+        )
