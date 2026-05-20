@@ -10,6 +10,7 @@ payload performs no writes after the first call (except fighter_raw audit
 rows, which are always appended — audit history is the whole point).
 """
 
+import re
 from datetime import datetime, UTC
 from typing import Iterable
 
@@ -31,6 +32,60 @@ def _parse_date_loose(s: str | None) -> datetime | None:
 
 def _slug(name: str) -> str:
     return name.lower().replace(" ", "-")
+
+
+_RECORD_TRIPLET_RE = re.compile(r"(\d+)-(\d+)-(\d+)")
+
+
+def _normalise_record(record: str | None) -> str | None:
+    """Extract canonical 'W-L-D' triplet from UFCStats record strings.
+
+    Strips the 'Record: ' prefix and any '(N NC)' suffix.  Returns None
+    if no triplet is found.
+    """
+    if not record:
+        return None
+    m = _RECORD_TRIPLET_RE.search(record)
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
+
+
+def _ht_to_cm(s: str | None) -> float | None:
+    """Parse '5\\' 9\"' / '5\\'9\"' into cm. Returns None on garbage."""
+    if not s or s == "--":
+        return None
+    m = re.match(r"\s*(\d+)\s*'\s*(\d+)\s*\"?\s*", s)
+    if not m:
+        return None
+    feet = int(m.group(1))
+    inches = int(m.group(2))
+    return round((feet * 12 + inches) * 2.54, 1)
+
+
+def _reach_to_cm(s: str | None) -> float | None:
+    """Parse '72\"' / '72' into cm. Returns None on garbage."""
+    if not s or s == "--":
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)?)\s*\"?\s*", s)
+    if not m:
+        return None
+    return round(float(m.group(1)) * 2.54, 1)
+
+
+def _extract_fighter_fields(item: dict) -> dict:
+    """Flatten parse_fighter_page output into Fighter column values.
+
+    `parse_fighter_page` returns {name, record, url, fights, stats:{Height, Weight,
+    Reach, STANCE, DOB, ...}}. Map those into our column shape.
+    """
+    stats = item.get("stats") or {}
+    return {
+        "record": _normalise_record(item.get("record")),
+        "stance": (stats.get("STANCE") or item.get("stance") or "").strip() or None,
+        "height_cm": _ht_to_cm(stats.get("Height") or item.get("height")),
+        "reach_cm": _reach_to_cm(stats.get("Reach") or item.get("reach")),
+        "dob": _parse_date_loose(stats.get("DOB") or item.get("dob")),
+        "photo_url": item.get("photo_url"),
+    }
 
 
 def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, int]:
@@ -58,18 +113,19 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
 
     for item in payload:
         url = item["url"]
+        fields = _extract_fighter_fields(item)
         existing = fighter_by_url.get(url)
         if existing is None:
             fighter = models.Fighter(
                 name=item["name"],
                 slug=_slug(item["name"]),
                 ufcstats_url=url,
-                record=item.get("record"),
-                stance=item.get("stance"),
-                height_cm=item.get("height_cm"),
-                reach_cm=item.get("reach_cm"),
-                dob=_parse_date_loose(item.get("dob")),
-                photo_url=item.get("photo_url"),
+                record=fields["record"],
+                stance=fields["stance"],
+                height_cm=fields["height_cm"],
+                reach_cm=fields["reach_cm"],
+                dob=fields["dob"],
+                photo_url=fields["photo_url"],
                 last_scraped_at=datetime.now(UTC),
             )
             db.add(fighter)
@@ -78,8 +134,18 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
             fighter_by_name[fighter.name] = fighter
             fighters_new += 1
         else:
-            existing.record = item.get("record", existing.record)
-            existing.stance = item.get("stance", existing.stance)
+            # Update only the fields we actually parsed; never blank out
+            # a previously-known value with None.
+            if fields["record"]:
+                existing.record = fields["record"]
+            if fields["stance"]:
+                existing.stance = fields["stance"]
+            if fields["height_cm"]:
+                existing.height_cm = fields["height_cm"]
+            if fields["reach_cm"]:
+                existing.reach_cm = fields["reach_cm"]
+            if fields["dob"]:
+                existing.dob = fields["dob"]
             existing.last_scraped_at = datetime.now(UTC)
             fighter = existing
             fighters_updated += 1

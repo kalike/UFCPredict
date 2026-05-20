@@ -5,6 +5,7 @@ Writes directly to ufc_lab via ufc_core.db.ingest.
 """
 
 import logging
+import os
 import threading
 from datetime import datetime, UTC
 
@@ -83,14 +84,56 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                     for f in db.query(db_models.Fighter).all()
                 }
                 all_payload: list[dict] = []
-                for letter in target:
-                    with _lock:
-                        _state["step"] = f"scraping letter '{letter}'"
-                    new_f, updated_f, _ = process_letter_incremental(
-                        letter, existing_index
+                summary_dict: dict = {}
+                # Two-level parallelism:
+                #   - LETTER_WORKERS letters in parallel
+                #   - inside each letter, FIGHTER_WORKERS fighter pages in parallel
+                # Total peak concurrency = LETTER_WORKERS * FIGHTER_WORKERS.
+                # Default 2 × 3 = 6 concurrent requests — UFCStats rate-limits
+                # aggressively above ~8 in our experience. get_soup() has retry
+                # with exponential backoff so transient 429s self-heal, but
+                # keeping peak concurrency low avoids stalling on backoff.
+                LETTER_WORKERS = int(os.environ.get("UFC_SCRAPE_LETTER_WORKERS", "2"))
+                FIGHTER_WORKERS = int(os.environ.get("UFC_SCRAPE_FIGHTER_WORKERS", "3"))
+
+                with _lock:
+                    _state["step"] = (
+                        f"scraping {len(target)} letters × {FIGHTER_WORKERS} fighter workers"
+                        f" (letter pool={LETTER_WORKERS})"
                     )
-                    all_payload.extend(new_f)
-                    all_payload.extend(updated_f)
+
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                done_letters = 0
+                all_failures: list[dict] = []  # [{name, url, error}]
+                with ThreadPoolExecutor(max_workers=LETTER_WORKERS) as letter_pool:
+                    futures = {
+                        letter_pool.submit(
+                            process_letter_incremental,
+                            letter, existing_index, summary_dict,
+                            None, FIGHTER_WORKERS,
+                        ): letter
+                        for letter in target
+                    }
+                    for fut in as_completed(futures):
+                        letter = futures[fut]
+                        try:
+                            new_f, updated_f, _, fails = fut.result()
+                            all_payload.extend(new_f)
+                            all_payload.extend(updated_f)
+                            all_failures.extend(fails)
+                            done_letters += 1
+                            with _lock:
+                                _state["step"] = (
+                                    f"letter '{letter}' done "
+                                    f"({done_letters}/{len(target)}) · "
+                                    f"+{len(new_f)} new, +{len(updated_f)} updated, "
+                                    f"{len(fails)} failed"
+                                )
+                        except Exception as e:
+                            logger.exception("letter %s failed: %s", letter, e)
+                            all_failures.append({"name": f"<letter:{letter}>", "url": "", "error": str(e)})
+                            with _lock:
+                                _state["step"] = f"letter '{letter}' failed: {e!r}"
 
                 with _lock:
                     _state["step"] = f"ingesting {len(all_payload)} fighters"
@@ -200,12 +243,25 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                         logger.exception("feature store materialization failed (non-fatal)")
 
                 # ── 5. Audit row ───────────────────────────────────────
+                # Serialize failures into error_msg as JSON so /runs can
+                # show what didn't make it. Limit to 200 entries to keep
+                # the audit row small.
+                import json as _json
+                if all_failures:
+                    sample = all_failures[:200]
+                    error_payload = _json.dumps({
+                        "failed_count": len(all_failures),
+                        "failed_sample": sample,
+                    })
+                else:
+                    error_payload = None
+
                 run = db_models.ScrapingRun(
                     source="ufcstats",
                     finished_at=datetime.now(UTC),
                     new_count=counts["fighters_new"],
                     updated_count=counts["fighters_updated"],
-                    error_msg=None,
+                    error_msg=error_payload,
                     recent_event_names=sorted(event_names) if event_names else None,
                 )
                 db.add(run); db.commit()
@@ -216,12 +272,14 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                         "finished_at": datetime.now(UTC).isoformat(),
                         "step": (
                             f"done · scraped={len(all_payload)} · events={len(event_names)} "
-                            f"· tap={(tap_summary or {}).get('matched', 0)} · feats={feat_count}"
+                            f"· tap={(tap_summary or {}).get('matched', 0)} "
+                            f"· feats={feat_count} · failed={len(all_failures)}"
                         ),
                         "counts": {
                             **counts,
                             "events_touched": len(event_names),
                             "fight_features_upserted": feat_count,
+                            "failed_count": len(all_failures),
                         },
                     })
             finally:

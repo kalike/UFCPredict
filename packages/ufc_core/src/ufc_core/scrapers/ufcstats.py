@@ -62,10 +62,41 @@ def log(message: str):
 # ──────────────────────────────────────────────────────────────────────
 # UTILIDADES DE SCRAPING  (unchanged from original)
 # ──────────────────────────────────────────────────────────────────────
-def get_soup(url):
-    response = requests.get(url, timeout=15)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
+def get_soup(url, max_retries: int = 5, base_backoff: float = 2.0):
+    """GET + parse with retry/backoff for 429 (rate limit) and 5xx errors.
+
+    Backs off exponentially: base * 2**attempt + small jitter. UFCStats
+    can throttle aggressively under burst — be patient and back off.
+    """
+    import random
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, timeout=20)
+            if response.status_code == 429:
+                # Honour Retry-After header when present, else exponential backoff
+                ra = response.headers.get("Retry-After")
+                try:
+                    wait = float(ra) if ra else base_backoff * (2 ** attempt)
+                except ValueError:
+                    wait = base_backoff * (2 ** attempt)
+                wait += random.uniform(0.0, 1.5)
+                log(f"  ⏳ 429 received, sleeping {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            if 500 <= response.status_code < 600:
+                wait = base_backoff * (2 ** attempt) + random.uniform(0.0, 1.0)
+                log(f"  ⏳ {response.status_code} received, sleeping {wait:.1f}s")
+                time.sleep(wait)
+                continue
+            response.raise_for_status()
+            return BeautifulSoup(response.text, "html.parser")
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            wait = base_backoff * (2 ** attempt) + random.uniform(0.0, 1.0)
+            time.sleep(wait)
+    # All retries exhausted
+    raise last_exc if last_exc is not None else RuntimeError(f"Failed to fetch {url}")
 
 
 def parse_table(table):
@@ -252,11 +283,18 @@ def process_letter_incremental(
     existing_index: dict[str, str],
     summary_dict: dict,
     progress_cb: Callable[[str, int, int], None] | None = None,
+    fighter_workers: int = 1,
 ):
     """
     Scrape a single letter page.  For each fighter:
     - If name+record match existing → skip
     - Otherwise → full scrape of that fighter
+
+    Args:
+        fighter_workers: if > 1, parses fighter pages in parallel using a
+            ThreadPoolExecutor. Default 1 = sequential (back-compat).
+            Be conservative — UFCStats may rate-limit on bursts.
+
     Returns (new_fighters, updated_fighters, skipped_count)
     """
     start = time.time()
@@ -268,6 +306,8 @@ def process_letter_incremental(
     updated_fighters: list[dict] = []
     skipped = 0
 
+    # Phase 1: scan index, decide per-row action (skip or fetch URL)
+    to_fetch: list[tuple[int, str, str, str | None]] = []  # (idx, fighter_url, fighter_name, existing_record)
     for idx, row in enumerate(all_rows, 1):
         cols = row.find_all("td")
         if not cols or not cols[0].find("a"):
@@ -277,13 +317,11 @@ def process_letter_incremental(
         # column. Concatenating with a literal space would produce " Kaiwen",
         # which then never matches the JSON entry stored as "Kaiwen", causing
         # the same fighter to be flagged NUEVO on every incremental run.
-        # Strip enclosing whitespace and collapse internal repeats.
         fighter_name = " ".join(
             (cols[0].text.strip() + " " + cols[1].text.strip()).split()
         )
 
         # Record built from W/L/D columns (7, 8, 9) of the UFCStats fighter index.
-        # Table layout: First | Last | Nickname | Ht. | Wt. | Reach | Stance | W | L | D | Belt
         if len(cols) >= 10:
             w = cols[7].text.strip()
             l = cols[8].text.strip()
@@ -292,10 +330,8 @@ def process_letter_incremental(
         else:
             web_record = ""
 
-        # URL is the stable identifier; name can collide (homonymous fighters).
         existing_record = existing_index.get(fighter_url)
         if existing_record is None:
-            # Backwards compat: some legacy entries indexed by name only.
             existing_record = existing_index.get(f"name:{fighter_name}")
 
         if existing_record is not None and _normalise_record(existing_record) == _normalise_record(
@@ -306,23 +342,50 @@ def process_letter_incremental(
                 progress_cb(letter, idx, len(all_rows))
             continue
 
-        # Need to scrape this fighter
-        action = "NUEVO" if existing_record is None else "ACTUALIZADO"
-        log(
-            f"  [{letter.upper()} {idx}/{len(all_rows)}] {action}: {fighter_name} (web={web_record}, prev={existing_record})"
-        )
+        to_fetch.append((idx, fighter_url, fighter_name, existing_record))
 
+    failures: list[dict] = []  # [{"name", "url", "error"}]
+
+    # Phase 2: fetch fighter pages (parallel if fighter_workers > 1)
+    def _do_one(item: tuple[int, str, str, str | None]):
+        idx, fighter_url, fighter_name, existing_record = item
+        action = "NUEVO" if existing_record is None else "ACTUALIZADO"
+        log(f"  [{letter.upper()} {idx}/{len(all_rows)}] {action}: {fighter_name}")
         try:
             fighter_data = parse_fighter_page(fighter_url)
-            if existing_record is None:
-                new_fighters.append(fighter_data)
-            else:
-                updated_fighters.append(fighter_data)
+            return ("new" if existing_record is None else "updated", fighter_data, None)
         except Exception as e:
             log(f"  ❌ Error {fighter_name}: {e}")
+            return (None, None, {"name": fighter_name, "url": fighter_url, "error": str(e)})
 
-        if progress_cb:
-            progress_cb(letter, idx, len(all_rows))
+    if fighter_workers > 1 and len(to_fetch) > 1:
+        with ThreadPoolExecutor(max_workers=fighter_workers) as pool:
+            futures = {pool.submit(_do_one, item): item for item in to_fetch}
+            done = 0
+            for fut in as_completed(futures):
+                kind, data, fail = fut.result()
+                done += 1
+                if data is not None:
+                    if kind == "new":
+                        new_fighters.append(data)
+                    else:
+                        updated_fighters.append(data)
+                elif fail is not None:
+                    failures.append(fail)
+                if progress_cb:
+                    progress_cb(letter, done, len(to_fetch))
+    else:
+        for item in to_fetch:
+            kind, data, fail = _do_one(item)
+            if data is not None:
+                if kind == "new":
+                    new_fighters.append(data)
+                else:
+                    updated_fighters.append(data)
+            elif fail is not None:
+                failures.append(fail)
+            if progress_cb:
+                progress_cb(letter, item[0], len(all_rows))
 
     elapsed = round(time.time() - start, 2)
     summary_dict[letter] = {
@@ -332,10 +395,13 @@ def process_letter_incremental(
         "skipped": skipped,
         "time_s": elapsed,
     }
+    summary_dict[letter]["failed"] = len(failures)
     log(
-        f"  🔠 {letter.upper()}: {len(all_rows)} total, {len(new_fighters)} nuevos, {len(updated_fighters)} actualizados, {skipped} sin cambios ({elapsed}s)"
+        f"  🔠 {letter.upper()}: {len(all_rows)} total, {len(new_fighters)} nuevos, "
+        f"{len(updated_fighters)} actualizados, {skipped} sin cambios, "
+        f"{len(failures)} fallidos ({elapsed}s)"
     )
-    return new_fighters, updated_fighters, skipped
+    return new_fighters, updated_fighters, skipped, failures
 
 
 _RECORD_PATTERN = re.compile(r"(\d+)-(\d+)-(\d+)")
@@ -413,7 +479,7 @@ def run_incremental_scrape(
         for future in as_completed(futures):
             letter = futures[future]
             try:
-                new_f, upd_f, _ = future.result()
+                new_f, upd_f, _, _ = future.result()
                 all_new.extend(new_f)
                 all_updated.extend(upd_f)
             except Exception as e:
