@@ -16,19 +16,19 @@ export default function DashboardPage() {
       <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
           <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">API</div>
-          <div className="mt-2 font-mono text-2xl">
+          <div className="mt-2 display-num text-3xl font-bold">
             {health.isLoading ? "…" : health.data?.status === "ok" ? "OK" : "ERR"}
           </div>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
           <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">DB</div>
-          <div className="mt-2 font-mono text-2xl">
+          <div className="mt-2 display-num text-3xl font-bold">
             {health.isLoading ? "…" : health.data?.db?.startsWith("ok") ? "OK" : "ERR"}
           </div>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
           <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">Modelos</div>
-          <div className="mt-2 font-mono text-2xl">
+          <div className="mt-2 display-num text-3xl font-bold">
             {models.isLoading ? "…" : models.data?.length ?? 0}
           </div>
         </div>
@@ -43,7 +43,7 @@ export default function DashboardPage() {
             {Object.entries(registry.data?.models ?? {}).length === 0 ? (
               <p className="text-[var(--color-muted)]">Sin modelos registrados.</p>
             ) : (
-              <ul className="space-y-1 font-mono">
+              <ul className="space-y-1">
                 {Object.entries(registry.data?.models ?? {}).map(([short, info]) => (
                   <li key={short} className="flex justify-between border-b border-[var(--color-border)] py-1">
                     <span>{short}</span>

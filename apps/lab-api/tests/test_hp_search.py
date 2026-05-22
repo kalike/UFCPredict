@@ -8,7 +8,7 @@ def test_hp_studies_initially_empty(client):
 
 
 def test_hp_start_creates_study(client):
-    r = client.post("/api/hp-search/start", json={"model_short": "lgbm", "n_trials": 5})
+    r = client.post("/api/hp-search/start", json={"model_short": "XGB", "n_trials": 5})
     assert r.status_code == 200
     body = r.json()
     assert body["started"] is True
@@ -27,8 +27,9 @@ def test_hp_status_endpoint_exists(client):
 
 
 def test_hp_unsupported_family_marks_not_supported(client):
+    # RF is trainable but HP search only supports XGB.
     r = client.post("/api/hp-search/start", json={
-        "model_short": "RF35", "n_trials": 3,
+        "model_short": "RF", "n_trials": 3,
     })
     assert r.status_code == 200
     body = r.json()

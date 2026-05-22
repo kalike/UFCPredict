@@ -48,7 +48,7 @@ export default function ComboSearchPage() {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-[var(--color-muted)]">Combos</span>
-                <span className="font-mono">{status.data.evaluated} / {status.data.total}</span>
+                <span className="display-num font-semibold">{status.data.evaluated} / {status.data.total}</span>
               </div>
               {pct !== null && (
                 <div className="w-full bg-[var(--color-border)] rounded-full h-1.5">
@@ -60,7 +60,7 @@ export default function ComboSearchPage() {
               )}
               <div className="flex justify-between">
                 <span className="text-[var(--color-muted)]">Best acc</span>
-                <span className="font-mono">{status.data.best_value?.toFixed(4) ?? "—"}</span>
+                <span className="display-num font-semibold">{status.data.best_value?.toFixed(4) ?? "—"}</span>
               </div>
               {status.data.best_shorts && (
                 <div className="flex flex-wrap gap-1">
@@ -80,7 +80,7 @@ export default function ComboSearchPage() {
               {status.data?.best_value != null && (
                 <div className="flex justify-between">
                   <span className="text-[var(--color-muted)]">Last best</span>
-                  <span className="font-mono">{status.data.best_value.toFixed(4)}</span>
+                  <span className="display-num font-semibold">{status.data.best_value.toFixed(4)}</span>
                 </div>
               )}
               {status.data?.best_shorts && (

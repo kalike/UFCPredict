@@ -27,22 +27,12 @@ _state: dict[str, Any] = {
     "error": None,
 }
 
-SUPPORTED_FAMILIES = {"LGBM", "LG52", "XGB", "XG52"}
+SUPPORTED_FAMILIES = {"XGB"}
 
 
 def get_status() -> dict:
     with _lock:
         return dict(_state)
-
-
-def _sample_lgbm_params(trial):
-    return {
-        "n_estimators": trial.suggest_int("n_estimators", 100, 800, step=50),
-        "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 7, 127, log=True),
-        "min_child_samples": trial.suggest_int("min_child_samples", 5, 80),
-        "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 5.0, log=True),
-    }
 
 
 def _sample_xgb_params(trial):
@@ -57,10 +47,7 @@ def _sample_xgb_params(trial):
 
 
 def _build_clf(model_short: str, params: dict):
-    if model_short in ("LGBM", "LG52"):
-        from lightgbm import LGBMClassifier
-        return LGBMClassifier(n_jobs=-1, verbose=-1, **params)
-    if model_short in ("XGB", "XG52"):
+    if model_short == "XGB":
         from xgboost import XGBClassifier
         return XGBClassifier(
             n_jobs=-1, eval_metric="logloss", verbosity=0, **params,
@@ -125,12 +112,26 @@ def start_hp_search(req: dict, study_id: int) -> dict:
             ds = DataStoreDB()
             ds.load()
 
+            feature_set = req.get("feature_set", "v7")
             with _lock:
                 _state["step"] = "building dataset"
             # Lazy import to avoid coupling at module load
-            from lab_api.services.training import _build_dataset_simple
+            from lab_api.services.training import (
+                _build_dataset_simple,
+                _resolve_feat_type,
+                _select_feat_cols,
+            )
             from ufc_core.config import TEST_CUTOFF_DT
-            df, feat_cols = _build_dataset_simple(ds, since_year)
+            df, _all_cols = _build_dataset_simple(ds, since_year)
+
+            # Narrow to the requested feature_set/feat_type (same selection
+            # the training service applies — see _select_feat_cols).
+            feat_type = _resolve_feat_type(req, model_short)
+            feat_cols = _select_feat_cols(df, feat_type=feat_type, feature_set=feature_set)
+            with _lock:
+                _state["step"] = (
+                    f"dataset ready ({feature_set}/{feat_type}, {len(feat_cols)} features)"
+                )
 
             event_col = df["event_date"]
             try:
@@ -145,7 +146,7 @@ def start_hp_search(req: dict, study_id: int) -> dict:
             X_train, y_train = train_df[feat_cols].values, train_df["result"].values
             X_test, y_test = test_df[feat_cols].values, test_df["result"].values
 
-            sampler_fn = _sample_lgbm_params if model_short in ("LGBM", "LG52") else _sample_xgb_params
+            sampler_fn = _sample_xgb_params
 
             study_row.status = "running"
             db.commit()

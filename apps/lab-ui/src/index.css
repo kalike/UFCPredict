@@ -1,23 +1,137 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Oswald:wght@600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --color-background: #0a0a0c;
-  --color-foreground: #e8e6e3;
-  --color-card: #14141a;
-  --color-border: #2a2a32;
-  --color-muted: #8a8a92;
-  --color-accent: #c1121f;
-  --color-accent-foreground: #ffffff;
-  --color-gold: #d4af37;
-  --font-display: "Oswald", system-ui, sans-serif;
-  --font-sans: "Inter", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* ── Structural colors (themed) — Broadcast Quant ── */
+  --color-background:    #0A0A0C;
+  --color-sidebar:       #111114;
+  --color-surface:       #111114;
+  --color-card:          #17171B;
+  --color-card-hover:    #1C1C22;
+  --color-border:        rgba(255, 255, 255, 0.08);
+  --color-border-subtle: rgba(255, 255, 255, 0.05);
+  --color-border-hover:  rgba(255, 255, 255, 0.14);
+
+  /* ── Brand accent (themed) — crimson-hi luminoso + gold ── */
+  --color-accent:            #EF4444;
+  --color-accent-hi:         #F87171;
+  --color-accent-2:          #F59E0B;
+  --color-accent-foreground: #0A0A0C;
+  --color-gold:              #F59E0B;
+
+  /* ── Text (themed) ── */
+  --color-foreground:         #F4F4F5;
+  --color-muted:              #A1A1AA;
+  --color-muted-foreground:   #71717A;
+
+  /* ── Semantic status (NOT themed — always the same) ── */
+  --color-success:     #22c55e;
+  --color-destructive: #ef4444;
+  --color-warning:     #eab308;
+  --color-info:        #3b82f6;
+
+  /* ── 11 ML model colors ── */
+  --color-model-rf35: #ef4444;
+  --color-model-rfda: #f97316;
+  --color-model-lgbm: #22c55e;
+  --color-model-rf52: #3b82f6;
+  --color-model-mlp:  #a855f7;
+  --color-model-svmb: #06b6d4;
+  --color-model-svmg: #84cc16;
+  --color-model-svmr: #f59e0b;
+  --color-model-deep: #ec4899;
+  --color-model-rnet: #14b8a6;
+  --color-model-ens3: #ffffff;
+
+  /* ── Typography ── */
+  --font-sans:    'Inter', system-ui, sans-serif;
+  --font-display: 'Oswald', sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+  /* ── Radius — Broadcast Quant (base 16px) ── */
+  --radius-sm: 0.6rem;   /* ~9.6px  */
+  --radius-md: 0.8rem;   /* ~12.8px */
+  --radius-lg: 1rem;     /* 16px    */
+  --radius-xl: 1.4rem;   /* ~22.4px */
 }
 
-html, body, #root {
-  height: 100%;
+/* ─── Shadows + gradients firmados — tema-aware via color-mix ────── */
+:root {
+  --shadow-card-hover:      0 14px 40px rgba(0, 0, 0, 0.45),
+                            0 0 0 1px color-mix(in oklch, var(--color-accent) 22%, transparent);
+  --shadow-primary-btn:     0 6px 18px color-mix(in oklch, var(--color-accent) 35%, transparent);
+  --shadow-primary-btn-hi:  0 10px 28px color-mix(in oklch, var(--color-accent) 55%, transparent);
+  --grad-hero:              linear-gradient(135deg, var(--color-accent) 0%, var(--color-accent-2) 100%);
+  --grad-card:              linear-gradient(135deg,
+                              color-mix(in oklch, var(--color-accent) 12%, transparent) 0%,
+                              color-mix(in oklch, var(--color-accent-2) 6%, transparent) 100%);
 }
 
-body {
-  font-family: var(--font-sans);
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "tnum", "cv05", "ss01";
+  }
+  *:focus-visible {
+    outline: 2px solid #EF4444;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: -1;
+    background:
+      radial-gradient(ellipse 1100px 700px at 15% -5%,
+        color-mix(in oklch, var(--color-accent) 28%, transparent),
+        transparent 60%),
+      radial-gradient(ellipse 700px 500px at 95% 0%,
+        color-mix(in oklch, var(--color-accent-2) 16%, transparent),
+        transparent 55%);
+  }
+
+  /* ── Glow crimson al hover en cards (Broadcast Quant) ── */
+  .bg-card {
+    transition: box-shadow 180ms ease, transform 180ms ease;
+  }
+  .bg-card:hover {
+    box-shadow: var(--shadow-card-hover);
+  }
+}
+
+@layer utilities {
+  .display-num {
+    font-family: 'Oswald', sans-serif;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .glass-card {
+    background: rgba(15, 15, 26, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  /* Glow effects usando el accent del tema activo */
+  .accent-glow {
+    box-shadow: 0 0 24px color-mix(in oklch, var(--color-accent) 20%, transparent);
+  }
+  .accent-glow-hover:hover {
+    box-shadow: 0 0 24px color-mix(in oklch, var(--color-accent) 25%, transparent);
+  }
+  .card-hover-glow:hover {
+    box-shadow: 0 0 20px color-mix(in oklch, var(--color-accent) 12%, transparent);
+  }
 }
