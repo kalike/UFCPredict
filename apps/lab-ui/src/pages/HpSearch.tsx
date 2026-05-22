@@ -41,8 +41,8 @@ export default function HpSearchPage() {
           {status.data?.is_running ? (
             <div className="space-y-2 text-sm">
               <div className="flex justify-between"><span className="text-[var(--color-muted)]">Model</span><span className="font-mono">{status.data.model_short}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Trials</span><span className="font-mono">{status.data.completed_trials}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Best</span><span className="font-mono">{status.data.best_value?.toFixed(4) ?? "—"}</span></div>
+              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Trials</span><span className="display-num font-semibold">{status.data.completed_trials}</span></div>
+              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Best</span><span className="display-num font-semibold">{status.data.best_value?.toFixed(4) ?? "—"}</span></div>
               <div className="text-xs text-[var(--color-muted)]">{status.data.step ?? "—"}</div>
             </div>
           ) : (
@@ -52,7 +52,7 @@ export default function HpSearchPage() {
                 <div className="text-xs text-[var(--color-muted)] font-mono">{status.data.step}</div>
               )}
               {status.data?.best_value != null && (
-                <div className="flex justify-between"><span className="text-[var(--color-muted)]">Last best</span><span className="font-mono">{status.data.best_value.toFixed(4)}</span></div>
+                <div className="flex justify-between"><span className="text-[var(--color-muted)]">Last best</span><span className="display-num font-semibold">{status.data.best_value.toFixed(4)}</span></div>
               )}
             </div>
           )}

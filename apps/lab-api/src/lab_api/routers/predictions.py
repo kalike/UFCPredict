@@ -244,8 +244,25 @@ def predict_event(event_id: int, db: Session = Depends(get_db)) -> PredictionRun
                 feats_normal[c] = 0.0
             if c not in feats_swapped.columns:
                 feats_swapped[c] = 0.0
-        X_n = feats_normal[feat_cols].values
-        X_s = feats_swapped[feat_cols].values
+
+        # Apply the same preprocessing used at training time (impute → transform
+        # → scale) so inference matches the model. Artifacts trained before this
+        # was added carry no imputer/transformer and fall back to raw features.
+        def _prepare(frame):
+            imputer = art.get("imputer")
+            transformer = art.get("transformer")
+            scaler = art.get("scaler")
+            df = imputer.transform(frame) if imputer is not None else frame
+            if transformer is not None:
+                df = transformer.transform_df(df)
+            X = df[feat_cols].values.astype("float32")
+            np.nan_to_num(X, copy=False, nan=0.0)
+            if scaler is not None:
+                X = scaler.transform(X)
+            return X
+
+        X_n = _prepare(feats_normal)
+        X_s = _prepare(feats_swapped)
         try:
             p_n = clf.predict_proba(X_n)[:, 1].astype(float)
             p_s = clf.predict_proba(X_s)[:, 1].astype(float)

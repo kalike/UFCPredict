@@ -88,8 +88,8 @@ export default function PredictionsPage() {
               {predict.data.predictions.map((p) => (
                 <tr key={p.fight_id} className="border-b border-[var(--color-border)]/40">
                   <td className="py-2">{p.fighter_1} <span className="text-[var(--color-muted)]">vs</span> {p.fighter_2}</td>
-                  <td className="font-mono">{(p.prob_f1 * 100).toFixed(1)}%</td>
-                  <td className="font-mono">{(p.prob_f2 * 100).toFixed(1)}%</td>
+                  <td className="display-num font-semibold text-base">{(p.prob_f1 * 100).toFixed(1)}%</td>
+                  <td className="display-num font-semibold text-base">{(p.prob_f2 * 100).toFixed(1)}%</td>
                   <td className="text-xs text-[var(--color-muted)] font-mono">{p.contributing_models.join(", ")}</td>
                 </tr>
               ))}

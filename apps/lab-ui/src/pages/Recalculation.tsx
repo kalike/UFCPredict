@@ -32,15 +32,15 @@ export default function RecalculationPage() {
           <div className="mt-4 space-y-1 text-sm">
             <div className="flex justify-between">
               <span className="text-[var(--color-muted)]">Total</span>
-              <span className="font-mono">{status.data?.total_events ?? 0}</span>
+              <span className="display-num font-semibold">{status.data?.total_events ?? 0}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--color-muted)]">Done</span>
-              <span className="font-mono">{status.data?.completed_events ?? 0}</span>
+              <span className="display-num font-semibold">{status.data?.completed_events ?? 0}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-[var(--color-muted)]">Skipped</span>
-              <span className="font-mono">{status.data?.skipped_events ?? 0}</span>
+              <span className="display-num font-semibold">{status.data?.skipped_events ?? 0}</span>
             </div>
             <div className="text-xs text-[var(--color-muted)] mt-2">{status.data?.step ?? "—"}</div>
           </div>

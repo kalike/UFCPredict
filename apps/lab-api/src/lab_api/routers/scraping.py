@@ -7,18 +7,28 @@ Writes directly to ufc_lab via ufc_core.db.ingest.
 import logging
 import os
 import threading
-from datetime import datetime, UTC
+from datetime import date, datetime, timedelta, UTC
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ufc_core.db import models as db_models
 
-from lab_api.deps import get_db
+from lab_api.deps import get_data_store, get_db
 
 logger = logging.getLogger("lab-api.scraping")
 
 router = APIRouter(prefix="/api/scraping", tags=["scraping"])
+
+# Keep the in-memory log tail bounded so a long scrape can't grow without limit.
+MAX_LOG_LINES = 400
+# Photo download targets fighters who fought within the last N years.
+PHOTOS_RECENCY_YEARS = 3
+
+# Ordered pipeline phases surfaced to the UI stepper. These mirror the real
+# lab-api flow (letter scrape → ingest → tapology → feature store), NOT the
+# legacy backend's A–E file pipeline.
+PIPELINE_PHASES = ["scraping", "ingest", "tapology", "features"]
 
 # ─── Shared job state (single-tenant lab) ──────────────────
 _lock = threading.Lock()
@@ -27,9 +37,79 @@ _state: dict = {
     "started_at": None,
     "finished_at": None,
     "step": None,
+    "phase": None,
+    "progress_current": 0,
+    "progress_total": 0,
+    "log_lines": [],
     "counts": None,
     "error": None,
 }
+
+
+def _set(**kw) -> None:
+    """Update the scrape state under the lock. Never call while holding _lock."""
+    with _lock:
+        _state.update(kw)
+
+
+def _log(msg: str) -> None:
+    """Append one line to the scrape log tail. Never call while holding _lock."""
+    with _lock:
+        lines: list[str] = _state["log_lines"]
+        lines.append(msg)
+        if len(lines) > MAX_LOG_LINES:
+            del lines[: -MAX_LOG_LINES]
+
+# ─── Photo job state (runs independently of the UFCStats scrape) ──────
+_photo_lock = threading.Lock()
+_photo_state: dict = {
+    "is_running": False,
+    "started_at": None,
+    "finished_at": None,
+    "step": None,
+    "phase": None,
+    "progress_current": 0,
+    "progress_total": 0,
+    "log_lines": [],
+    "counts": None,
+    "error": None,
+}
+
+
+def _photo_set(**kw) -> None:
+    """Update the photo state under its lock. Never call while holding the lock."""
+    with _photo_lock:
+        _photo_state.update(kw)
+
+
+def _photo_log(msg: str) -> None:
+    """Append one line to the photo log tail. Never call while holding the lock."""
+    with _photo_lock:
+        lines: list[str] = _photo_state["log_lines"]
+        lines.append(msg)
+        if len(lines) > MAX_LOG_LINES:
+            del lines[: -MAX_LOG_LINES]
+
+
+def _recent_fighter_names(years: int) -> list[str]:
+    """Fighter names with a fight within the last `years` years (per DataStore).
+
+    Mirrors the ranking's activity filter: the long tail of retired fighters
+    mostly 404s on ufc.com, so the photo backfill targets active faces only.
+    """
+    ds = get_data_store()
+    cutoff = date.today() - timedelta(days=years * 365)
+    names: list[str] = []
+    for name, history in ds.fighter_histories.items():
+        if not history:
+            continue
+        last_dt = ds.event_dates.get(history[0].get("event", ""))
+        if last_dt is None:
+            continue
+        last_d = last_dt.date() if isinstance(last_dt, datetime) else last_dt
+        if last_d >= cutoff:
+            names.append(name)
+    return sorted(names)
 
 
 class StartResponse(BaseModel):
@@ -42,6 +122,10 @@ class StatusResponse(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     step: str | None = None
+    phase: str | None = None
+    progress_current: int = 0
+    progress_total: int = 0
+    log_lines: list[str] = []
     counts: dict | None = None
     error: str | None = None
 
@@ -61,7 +145,8 @@ def start_scrape(letters: str | None = None) -> StartResponse:
             "is_running": True,
             "started_at": datetime.now(UTC).isoformat(),
             "finished_at": None, "step": "starting",
-            "counts": None, "error": None,
+            "phase": None, "progress_current": 0, "progress_total": 0,
+            "log_lines": [], "counts": None, "error": None,
         })
 
     def _job():
@@ -96,11 +181,19 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 LETTER_WORKERS = int(os.environ.get("UFC_SCRAPE_LETTER_WORKERS", "2"))
                 FIGHTER_WORKERS = int(os.environ.get("UFC_SCRAPE_FIGHTER_WORKERS", "3"))
 
-                with _lock:
-                    _state["step"] = (
+                _set(
+                    phase="scraping",
+                    progress_current=0,
+                    progress_total=len(target),
+                    step=(
                         f"scraping {len(target)} letters × {FIGHTER_WORKERS} fighter workers"
                         f" (letter pool={LETTER_WORKERS})"
-                    )
+                    ),
+                )
+                _log(
+                    f"[INFO] scraping {len(target)} letters "
+                    f"({FIGHTER_WORKERS} fighter workers, letter pool={LETTER_WORKERS})"
+                )
 
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 done_letters = 0
@@ -122,22 +215,34 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                             all_payload.extend(updated_f)
                             all_failures.extend(fails)
                             done_letters += 1
-                            with _lock:
-                                _state["step"] = (
+                            _set(
+                                progress_current=done_letters,
+                                step=(
                                     f"letter '{letter}' done "
                                     f"({done_letters}/{len(target)}) · "
                                     f"+{len(new_f)} new, +{len(updated_f)} updated, "
                                     f"{len(fails)} failed"
-                                )
+                                ),
+                            )
+                            _log(
+                                f"[OK] letter '{letter}' ({done_letters}/{len(target)}): "
+                                f"+{len(new_f)} new, +{len(updated_f)} updated, "
+                                f"{len(fails)} failed"
+                            )
                         except Exception as e:
                             logger.exception("letter %s failed: %s", letter, e)
                             all_failures.append({"name": f"<letter:{letter}>", "url": "", "error": str(e)})
-                            with _lock:
-                                _state["step"] = f"letter '{letter}' failed: {e!r}"
+                            done_letters += 1
+                            _set(progress_current=done_letters, step=f"letter '{letter}' failed: {e!r}")
+                            _log(f"[ERROR] letter '{letter}' failed: {e!r}")
 
-                with _lock:
-                    _state["step"] = f"ingesting {len(all_payload)} fighters"
+                _set(phase="ingest", step=f"ingesting {len(all_payload)} fighters")
+                _log(f"[INFO] ingesting {len(all_payload)} fighters into DB")
                 counts = ingest_fighters_payload(db, all_payload)
+                _log(
+                    f"[OK] ingest done: +{counts['fighters_new']} new, "
+                    f"+{counts['fighters_updated']} updated"
+                )
 
                 # ── 2. Compute event names touched ─────────────────────
                 # Tapology hook receives a list of event names that may need
@@ -153,8 +258,8 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 # ── 3. Tapology hook (best-effort) ─────────────────────
                 tap_summary: dict | None = None
                 if event_names:
-                    with _lock:
-                        _state["step"] = f"tapology hook for {len(event_names)} events"
+                    _set(phase="tapology", step=f"tapology hook for {len(event_names)} events")
+                    _log(f"[INFO] tapology hook for {len(event_names)} events")
                     try:
                         import asyncio
                         from ufc_core.tapology import tapology_hook_for_event_names
@@ -162,17 +267,19 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                             tapology_hook_for_event_names(event_names)
                         )
                         logger.info("tapology hook summary: %s", tap_summary)
+                        _log(f"[OK] tapology: {(tap_summary or {}).get('matched', 0)} matched")
                     except Exception as tap_exc:
                         logger.exception("tapology hook failed (non-fatal)")
                         tap_summary = {"error": repr(tap_exc)}
+                        _log(f"[WARN] tapology hook failed (non-fatal): {tap_exc!r}")
 
                 # ── 4. Materialize fight_features (v7) ─────────────────
                 # Iterate only over events we just touched. For each, compute
                 # features for all its fights and upsert into fight_features.
                 feat_count = 0
                 if event_names:
-                    with _lock:
-                        _state["step"] = "materializing fight_features (v7)"
+                    _set(phase="features", step="materializing fight_features (v7)")
+                    _log(f"[INFO] materializing fight_features (v7) for {len(event_names)} events")
                     try:
                         from ufc_core.data_loader import DataStoreDB
                         from ufc_core.features.engine import compute_features_for_fights
@@ -239,8 +346,34 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                                 )
                                 feat_count += 1
                         db.commit()
+                        _log(f"[OK] fight_features (v7): {feat_count} rows upserted")
                     except Exception as feat_exc:
                         logger.exception("feature store materialization failed (non-fatal)")
+                        _log(f"[WARN] feature store materialization failed (non-fatal): {feat_exc!r}")
+
+                # ── 4.5 Fighter photos (best-effort, incremental) ──────
+                # Download missing headshots for the fighters touched this run.
+                # download_missing_photos skips files already on disk, so this
+                # is cheap on repeat runs and only fetches genuinely new faces.
+                photo_summary: dict | None = None
+                scraped_names = [f["name"] for f in all_payload if f.get("name")]
+                if scraped_names:
+                    _set(step=f"downloading photos for {len(scraped_names)} fighters")
+                    _log(f"[INFO] downloading photos for {len(scraped_names)} fighters")
+                    try:
+                        from ufc_core.config import FOTOS_DIR
+                        from ufc_core.scrapers.fotos import download_missing_photos
+                        photo_summary = download_missing_photos(scraped_names, FOTOS_DIR)
+                        logger.info("photo summary: %s", photo_summary)
+                        _log(
+                            f"[OK] photos: ok={photo_summary.get('ok', 0)} "
+                            f"skip={photo_summary.get('skip', 0)} "
+                            f"404={photo_summary.get('not_found', 0)}"
+                        )
+                    except Exception as photo_exc:
+                        logger.exception("photo download failed (non-fatal)")
+                        photo_summary = {"error": repr(photo_exc)}
+                        _log(f"[WARN] photo download failed (non-fatal): {photo_exc!r}")
 
                 # ── 5. Audit row ───────────────────────────────────────
                 # Serialize failures into error_msg as JSON so /runs can
@@ -266,19 +399,27 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 )
                 db.add(run); db.commit()
 
+                _log(
+                    f"[OK] done · scraped={len(all_payload)} · events={len(event_names)} "
+                    f"· tap={(tap_summary or {}).get('matched', 0)} · feats={feat_count} "
+                    f"· photos={(photo_summary or {}).get('ok', 0)} · failed={len(all_failures)}"
+                )
                 with _lock:
                     _state.update({
                         "is_running": False,
+                        "phase": "done",
                         "finished_at": datetime.now(UTC).isoformat(),
                         "step": (
                             f"done · scraped={len(all_payload)} · events={len(event_names)} "
                             f"· tap={(tap_summary or {}).get('matched', 0)} "
-                            f"· feats={feat_count} · failed={len(all_failures)}"
+                            f"· feats={feat_count} · photos={(photo_summary or {}).get('ok', 0)} "
+                            f"· failed={len(all_failures)}"
                         ),
                         "counts": {
                             **counts,
                             "events_touched": len(event_names),
                             "fight_features_upserted": feat_count,
+                            "photos_downloaded": (photo_summary or {}).get("ok", 0),
                             "failed_count": len(all_failures),
                         },
                     })
@@ -286,6 +427,7 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 db.close()
         except Exception as e:
             logger.exception("scrape job failed")
+            _log(f"[ERROR] scrape job failed: {e!r}")
             with _lock:
                 _state.update({
                     "is_running": False,
@@ -301,6 +443,109 @@ def start_scrape(letters: str | None = None) -> StartResponse:
 def status() -> StatusResponse:
     with _lock:
         snap = dict(_state)
+    return StatusResponse(**snap)
+
+
+@router.post("/photos", response_model=StartResponse)
+def start_photo_scrape(
+    limit: int | None = None,
+    recent_only: bool = True,
+    db: Session = Depends(get_db),
+) -> StartResponse:
+    """Backfill missing fighter headshots into FOTOS_DIR (best-effort, async).
+
+    download_missing_photos is incremental (skips PNGs already on disk), so
+    repeat runs are cheap. By default only fighters who fought within the last
+    PHOTOS_RECENCY_YEARS years are targeted — the long tail of retired fighters
+    mostly 404s on ufc.com and isn't worth hammering. Pass `recent_only=false`
+    to attempt every fighter, or `limit` to cap the count for a quick smoke run.
+    """
+    with _photo_lock:
+        if _photo_state["is_running"]:
+            raise HTTPException(409, "A photo download is already running")
+        _photo_state.update({
+            "is_running": True,
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None, "step": "starting",
+            "phase": "photos", "progress_current": 0, "progress_total": 0,
+            "log_lines": [], "counts": None, "error": None,
+        })
+
+    if recent_only:
+        names = _recent_fighter_names(PHOTOS_RECENCY_YEARS)
+    else:
+        names = [
+            n for (n,) in
+            db.query(db_models.Fighter.name).order_by(db_models.Fighter.name).all()
+        ]
+    if limit:
+        names = names[:limit]
+    scope = f"last {PHOTOS_RECENCY_YEARS}y" if recent_only else "all fighters"
+    _photo_log(f"[INFO] {len(names)} fighters considered ({scope}, incremental)")
+
+    def _job():
+        from ufc_core.config import FOTOS_DIR
+        from ufc_core.db.engine import SessionLocal
+        from ufc_core.scrapers.fotos import download_missing_photos
+
+        try:
+            def _progress(done: int, total: int) -> None:
+                _photo_set(
+                    step=f"downloading {done}/{total}",
+                    progress_current=done,
+                    progress_total=total,
+                )
+
+            summary = download_missing_photos(
+                names, FOTOS_DIR, log_cb=_photo_log, progress_cb=_progress,
+            )
+
+            db2: Session = SessionLocal()
+            try:
+                run = db_models.ScrapingRun(
+                    source="fotos",
+                    finished_at=datetime.now(UTC),
+                    new_count=summary.get("ok", 0),
+                    updated_count=0,
+                    error_msg=None,
+                )
+                db2.add(run); db2.commit()
+            finally:
+                db2.close()
+
+            _photo_log(
+                f"[OK] done · ok={summary.get('ok', 0)} · skip={summary.get('skip', 0)} "
+                f"· 404={summary.get('not_found', 0)} · err={summary.get('error', 0)}"
+            )
+            _photo_set(
+                is_running=False,
+                finished_at=datetime.now(UTC).isoformat(),
+                step=(
+                    f"done · ok={summary.get('ok', 0)} · skip={summary.get('skip', 0)} "
+                    f"· 404={summary.get('not_found', 0)} · err={summary.get('error', 0)}"
+                ),
+                counts=summary,
+            )
+        except Exception as e:
+            logger.exception("photo download job failed")
+            _photo_log(f"[ERROR] {e!r}")
+            _photo_set(
+                is_running=False,
+                finished_at=datetime.now(UTC).isoformat(),
+                step="failed", error=repr(e),
+            )
+
+    threading.Thread(target=_job, daemon=True).start()
+    return StartResponse(
+        started=True,
+        message=f"Photo download kicked off for {len(names)} fighters",
+    )
+
+
+@router.get("/photos/status", response_model=StatusResponse)
+def photo_status() -> StatusResponse:
+    with _photo_lock:
+        snap = dict(_photo_state)
     return StatusResponse(**snap)
 
 

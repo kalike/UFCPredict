@@ -70,3 +70,45 @@ def test_engine():
 def client(test_engine):
     from lab_api.main import app
     return TestClient(app)
+
+
+def _wait_workers_idle(timeout: float) -> list[str]:
+    """Poll every background worker until is_running=False. Returns the names
+    of workers still busy after the timeout (empty list = all idle)."""
+    import time
+    from lab_api.services import combo_search, hp_search, recalculation, training
+    from lab_api.routers import scraping
+
+    # Services expose get_status(); the scraping router keeps its scrape/photo
+    # job state as module-level dicts. Both spawn daemon threads that hold a DB
+    # connection, so a test that starts one and returns without waiting blocks
+    # the next test's DROP DATABASE ("being accessed by other users").
+    checks = {
+        "training": lambda: training.get_status()["is_running"],
+        "hp_search": lambda: hp_search.get_status()["is_running"],
+        "combo_search": lambda: combo_search.get_status()["is_running"],
+        "recalculation": lambda: recalculation.get_status()["is_running"],
+        "scraping": lambda: scraping._state["is_running"],
+        "photos": lambda: scraping._photo_state["is_running"],
+    }
+    deadline = time.time() + timeout
+    busy = [n for n, c in checks.items() if c()]
+    while busy and time.time() < deadline:
+        time.sleep(0.2)
+        busy = [n for n, c in checks.items() if c()]
+    return busy
+
+
+@pytest.fixture(autouse=True)
+def workers_idle():
+    """Workers are module-level singletons with daemon threads — a test that
+    starts a job and returns without waiting poisons every later test
+    ("A training job is already running"). Wait defensively before each test,
+    and fail the leaking test (not its victim) if it leaves a worker busy."""
+    _wait_workers_idle(timeout=60.0)
+    yield
+    busy = _wait_workers_idle(timeout=60.0)
+    assert not busy, (
+        f"Test left background worker(s) still running after 60s: {busy}. "
+        "Poll the worker's status endpoint until is_running=False before returning."
+    )

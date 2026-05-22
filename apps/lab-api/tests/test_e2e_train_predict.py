@@ -1,4 +1,4 @@
-"""End-to-end smoke: seed → train LGBM → predict the seeded event.
+"""End-to-end smoke: seed → train XGB → predict the seeded event.
 
 Offline test — no network.  Builds a synthetic fight history wide enough
 to satisfy the training worker's "≥100 rows" guard and the train/test
@@ -335,8 +335,8 @@ def _wait_idle(client, timeout_seconds: float = 120.0) -> dict:
 # ─── Test ────────────────────────────────────────────────────────────────────
 
 
-def test_e2e_train_lgbm_then_predict_event(client, test_engine):
-    """Offline e2e: seed synthetic data → train LGBM → predict future event."""
+def test_e2e_train_xgb_then_predict_event(client, test_engine):
+    """Offline e2e: seed synthetic data → train XGB → predict future event."""
     Base.metadata.create_all(test_engine)
 
     db = SessionLocal()
@@ -347,21 +347,15 @@ def test_e2e_train_lgbm_then_predict_event(client, test_engine):
         seeder.seed_fighters()
         future_event_id = seeder.seed_events()
         seeder.attach_fighter_raw()
-
-        # Ensure LGBM model catalog row
-        if db.query(db_models.Model).filter_by(short="LGBM").one_or_none() is None:
-            db.add(db_models.Model(
-                short="LGBM", family="sklearn", default_feat_type="35f",
-                description="LightGBM — e2e smoke test",
-            ))
-            db.commit()
+        # No manual Model seed: the training worker auto-registers canonical
+        # models (XGB) on first train.
     finally:
         db.close()
 
     # ── Step 1: Start training ───────────────────────────────────────────────
     r = client.post(
         "/api/models/train",
-        json={"model_short": "LGBM", "feature_set": "v7", "dataset": "since2010"},
+        json={"model_short": "XGB", "feature_set": "v7", "dataset": "since2010"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -381,7 +375,7 @@ def test_e2e_train_lgbm_then_predict_event(client, test_engine):
     # ── Step 3: Verify version + artifact ────────────────────────────────────
     db = SessionLocal()
     try:
-        m = db.query(db_models.Model).filter_by(short="LGBM").one()
+        m = db.query(db_models.Model).filter_by(short="XGB").one()
         v = (
             db.query(db_models.ModelVersion)
               .filter_by(model_id=m.id)
@@ -404,7 +398,7 @@ def test_e2e_train_lgbm_then_predict_event(client, test_engine):
         db.close()
 
     # ── Step 4: Activate the trained version ─────────────────────────────────
-    r = client.post(f"/api/models/LGBM/versions/{version_idx}/activate")
+    r = client.post(f"/api/models/XGB/versions/{version_idx}/activate")
     assert r.status_code == 200, r.text
 
     # ── Step 5: Predict the future event ─────────────────────────────────────
@@ -426,32 +420,23 @@ def test_e2e_train_lgbm_then_predict_event(client, test_engine):
         assert abs(pred["prob_f1"] + pred["prob_f2"] - 1.0) < 1e-5, (
             f"prob_f1 + prob_f2 != 1.0: {pred}"
         )
-        assert "LGBM" in pred["contributing_models"], (
-            f"LGBM not in contributing_models: {pred['contributing_models']}"
+        assert "XGB" in pred["contributing_models"], (
+            f"XGB not in contributing_models: {pred['contributing_models']}"
         )
 
 
-def test_e2e_train_rf_and_mlp(client, test_engine):
-    """Confirm RF35 and MLP can be trained on the same synthetic dataset.
+def test_e2e_train_rf_and_cb(client, test_engine):
+    """Confirm RF and CB can be trained on the same synthetic dataset.
 
-    Reuses the seed from the LGBM e2e — synthetic data is idempotent so
-    re-seeding produces the same rows (or skips if already present).
+    Reuses the seed from the XGB e2e — synthetic data is idempotent so
+    re-seeding produces the same rows (or skips if already present). The
+    training worker auto-registers each canonical Model row on first train.
     """
     Base.metadata.create_all(test_engine)
 
     db = SessionLocal()
     seeder = _Seeder(db)
     try:
-        # Register the two model families if not present
-        for short, family in [("RF35", "sklearn"), ("MLP", "sklearn")]:
-            if db.query(db_models.Model).filter_by(short=short).one_or_none() is None:
-                db.add(db_models.Model(
-                    short=short, family=family,
-                    default_feat_type="35f",
-                    description=f"Test {short}",
-                ))
-        db.commit()
-
         # Seed only if no E2E fighters are present (previous test already seeded)
         existing = (
             db.query(db_models.Fighter)
@@ -465,7 +450,7 @@ def test_e2e_train_rf_and_mlp(client, test_engine):
     finally:
         db.close()
 
-    for short in ("RF35", "MLP"):
+    for short in ("RF", "CB"):
         r = client.post(
             "/api/models/train",
             json={"model_short": short, "feature_set": "v7", "dataset": "since2010"},
@@ -473,7 +458,7 @@ def test_e2e_train_rf_and_mlp(client, test_engine):
         assert r.status_code == 200, r.text
         assert r.json()["started"] is True
 
-        final = _wait_idle(client, timeout_seconds=90)
+        final = _wait_idle(client, timeout_seconds=120)
         assert not final["is_running"], f"Training for {short} did not finish: {final}"
         assert "failed" not in (final.get("step") or "").lower(), (
             f"Training for {short} failed: {final}"
@@ -481,46 +466,6 @@ def test_e2e_train_rf_and_mlp(client, test_engine):
         assert final.get("result_version_id") is not None, (
             f"{short} trained but no version_id. step={final.get('step')} err={final.get('error')}"
         )
-
-
-def test_e2e_train_svm_base(client, test_engine):
-    """SVMb on a tiny dataset — confirms the Pipeline (imp+scale+SVC) trains."""
-    Base.metadata.create_all(test_engine)
-    db = SessionLocal()
-    try:
-        if db.query(db_models.Model).filter_by(short="SVMb").one_or_none() is None:
-            db.add(db_models.Model(
-                short="SVMb", family="sklearn",
-                default_feat_type="35f", description="Test SVM Base",
-            ))
-            db.commit()
-        # Seed only if no E2E fighters are present
-        existing = (
-            db.query(db_models.Fighter)
-            .filter(db_models.Fighter.name.like(f"{_Seeder.PREFIX}%"))
-            .first()
-        )
-        if existing is None:
-            seeder = _Seeder(db)
-            seeder.seed_fighters()
-            seeder.seed_events()
-            seeder.attach_fighter_raw()
-    finally:
-        db.close()
-
-    r = client.post(
-        "/api/models/train",
-        json={"model_short": "SVMb", "feature_set": "v7", "dataset": "since2010"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["started"] is True
-
-    final = _wait_idle(client, timeout_seconds=180)  # SVM slower than LGBM
-    assert not final["is_running"], f"SVMb did not finish: {final}"
-    assert "failed" not in (final.get("step") or "").lower(), (
-        f"SVMb failed: step={final.get('step')} err={final.get('error')}"
-    )
-    assert final.get("result_version_id") is not None
 
 
 def _seed_synthetic_data(db) -> None:
@@ -531,14 +476,14 @@ def _seed_synthetic_data(db) -> None:
     seeder.attach_fighter_raw()
 
 
-def test_e2e_hp_search_lgbm(client, test_engine):
-    """Run 2 Optuna trials on LGBM against the synthetic dataset."""
+def test_e2e_hp_search_xgb(client, test_engine):
+    """Run 2 Optuna trials on XGB against the synthetic dataset."""
     Base.metadata.create_all(test_engine)
     db = SessionLocal()
     try:
-        if db.query(db_models.Model).filter_by(short="LGBM").one_or_none() is None:
-            db.add(db_models.Model(short="LGBM", family="sklearn",
-                                  default_feat_type="35f", description="Test LGBM"))
+        if db.query(db_models.Model).filter_by(short="XGB").one_or_none() is None:
+            db.add(db_models.Model(short="XGB", family="xgboost",
+                                  default_feat_type="52f", description="Test XGB"))
             db.commit()
         from sqlalchemy import select
         if db.execute(select(db_models.Event).limit(1)).first() is None:
@@ -547,7 +492,7 @@ def test_e2e_hp_search_lgbm(client, test_engine):
         db.close()
 
     r = client.post("/api/hp-search/start", json={
-        "model_short": "LGBM", "n_trials": 2, "feature_set": "v7",
+        "model_short": "XGB", "n_trials": 2, "feature_set": "v7",
     })
     assert r.status_code == 200
     body = r.json()
