@@ -34,7 +34,7 @@ export default function SpecialCasesTierGrid({ tiers, onSelect }: SpecialCasesTi
 
         const subtitleColor = {
           default: 'text-muted-foreground',
-          warning: 'text-yellow-400',
+          warning: 'text-warning',
           success: 'text-success',
           destructive: 'text-destructive',
         }[variant]

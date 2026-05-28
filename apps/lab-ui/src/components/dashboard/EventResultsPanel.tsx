@@ -30,7 +30,7 @@ export default function EventResultsPanel({ eventName, onClose }: EventResultsPa
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-foreground font-semibold">{eventName}</h3>
-          {data?.fights && (
+          {data?.fights && data.fights.length > 0 && (
             <p className="text-xs text-muted-foreground mt-0.5">
               {data.fights.length} peleas · {fmtPctRaw((correct.length / data.fights.length) * 100)} consenso
             </p>
