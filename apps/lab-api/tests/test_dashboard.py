@@ -88,3 +88,28 @@ def test_probability_tier_bins():
     assert dsvc._probability_tier(0.62) == "high"
     assert dsvc._probability_tier(0.68) == "very_high"
     assert dsvc._probability_tier(0.80) == "extreme"
+
+
+def test_summary_endpoint_shape(client):
+    r = client.get("/api/dashboard/summary")
+    assert r.status_code == 200
+    body = r.json()
+    for key in (
+        "latest_event", "n_past_events", "n_fighters", "n_models",
+        "avg_by_model", "accuracy_by_event", "recent_fights",
+        "consensus_tiers", "probability_tiers", "special_case_tiers",
+        "special_case_fights", "disabled_models", "min_fights",
+    ):
+        assert key in body, f"missing {key}"
+    assert body["n_models"] == 4
+
+
+def test_event_fights_404_when_unknown(client):
+    r = client.get("/api/dashboard/event-fights", params={"event": "No Such Event"})
+    assert r.status_code == 404
+
+
+def test_recalculation_status_endpoint(client):
+    r = client.get("/api/dashboard/recalculation-status")
+    assert r.status_code == 200
+    assert "is_running" in r.json()
