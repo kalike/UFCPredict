@@ -50,7 +50,9 @@ class TrainRequest(BaseModel):
     feat_type: str = "auto"
     test_cutoff: int | str = 2024
     min_fights: int = 0
-    use_pit: bool = False
+    # PIT on by default: features must use only pre-fight history (no temporal
+    # leakage). Matches HP search, which always trains with use_pit=True.
+    use_pit: bool = True
 
 
 class BatchTrainRequest(BaseModel):

@@ -1,105 +1,66 @@
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
-import { Card, PageHeader, Badge, Button } from "../components/ui";
+import { PageHeader } from "../components/ui";
+import { FightInputForm } from "../components/predictions/FightInputForm";
+import { PredictionResults } from "../components/predictions/PredictionResults";
+import { PastEventsTab } from "../components/predictions/PastEventsTab";
+import { SessionsTab } from "../components/predictions/SessionsTab";
+import { usePredictFights } from "../components/predictions/usePredictions";
+import type { FightInput } from "../api/client";
+
+type Tab = "new" | "past" | "sessions";
+
+const TABS: { key: Tab; label: string }[] = [
+  { key: "new", label: "Nueva predicción" },
+  { key: "past", label: "Eventos pasados" },
+  { key: "sessions", label: "Sesiones" },
+];
 
 export default function PredictionsPage() {
-  const [filter, setFilter] = useState<"all" | "scheduled" | "completed">("all");
-  const [selectedEvent, setSelectedEvent] = useState<number | null>(null);
-  const events = useQuery({
-    queryKey: ["events", filter],
-    queryFn: () => api.events(filter === "all" ? undefined : filter),
-  });
-  const predict = useMutation({
-    mutationFn: (eventId: number) => api.predict(eventId),
-  });
+  const [tab, setTab] = useState<Tab>("new");
+  const predict = usePredictFights();
+
+  function onPredict(event: string, fights: FightInput[]) {
+    predict.mutate({ event, fights });
+  }
 
   return (
-    <div className="space-y-4">
-      <PageHeader title="Predictions" subtitle="Eventos disponibles · ejecuta inference contra los modelos activos" />
-      <Card>
-        <div className="flex gap-2 mb-4">
-          {(["all", "scheduled", "completed"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-3 py-1 rounded-md text-xs uppercase tracking-widest transition-colors ${
-                filter === f ? "bg-[var(--color-accent)] text-white" : "bg-white/5 hover:bg-white/10"
-              }`}
-            >
-              {f}
-            </button>
-          ))}
+    <div className="space-y-5">
+      <PageHeader
+        title="Predicciones"
+        subtitle="Inference con los modelos activos + TTA · matchups arbitrarios, eventos pasados y sesiones"
+      />
+
+      {/* Tabs */}
+      <div className="flex gap-2 border-b border-border">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              tab === t.key
+                ? "border-accent text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "new" && (
+        <div className="space-y-5">
+          <FightInputForm onPredict={onPredict} isPending={predict.isPending} />
+          {predict.isError && (
+            <div className="rounded-md bg-destructive/10 border border-destructive/30 px-3 py-2 text-sm text-destructive">
+              {(predict.error as Error).message}
+            </div>
+          )}
+          {predict.data && <PredictionResults data={predict.data} />}
         </div>
-        <table className="w-full text-sm">
-          <thead className="text-[10px] uppercase tracking-widest text-[var(--color-muted)] border-b border-[var(--color-border)]">
-            <tr>
-              <th className="text-left py-2">ID</th>
-              <th className="text-left">Name</th>
-              <th>Date</th>
-              <th>Status</th>
-              <th>Fights</th>
-              <th>Acción</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(events.data ?? []).map((e) => (
-              <tr key={e.id} className="border-b border-[var(--color-border)]/40">
-                <td className="py-2 font-mono">{e.id}</td>
-                <td>{e.name}</td>
-                <td className="text-xs text-[var(--color-muted)] font-mono">{e.date?.slice(0, 10) ?? "—"}</td>
-                <td><Badge tone={e.status === "completed" ? "gold" : "accent"}>{e.status}</Badge></td>
-                <td className="font-mono">{e.fight_count}</td>
-                <td>
-                  <Button
-                    variant="secondary"
-                    onClick={() => { setSelectedEvent(e.id); predict.mutate(e.id); }}
-                    disabled={predict.isPending}
-                  >
-                    {predict.isPending && selectedEvent === e.id ? "Calculando…" : "Predict"}
-                  </Button>
-                </td>
-              </tr>
-            ))}
-            {(events.data ?? []).length === 0 && (
-              <tr><td colSpan={6} className="py-4 text-[var(--color-muted)]">Sin eventos para el filtro.</td></tr>
-            )}
-          </tbody>
-        </table>
-      </Card>
-
-      {predict.isError && (
-        <Card><p className="text-[var(--color-accent)] text-sm">{(predict.error as Error).message}</p></Card>
       )}
 
-      {predict.data && (
-        <Card>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)]">
-              {predict.data.event_name} · session #{predict.data.session_id}
-            </h3>
-            {predict.data.notes && <span className="text-[10px] text-[var(--color-muted)]">{predict.data.notes}</span>}
-          </div>
-          <table className="w-full text-sm">
-            <thead className="text-[10px] uppercase tracking-widest text-[var(--color-muted)] border-b border-[var(--color-border)]">
-              <tr><th className="text-left py-2">Fight</th><th>P(F1)</th><th>P(F2)</th><th>Modelos</th></tr>
-            </thead>
-            <tbody>
-              {predict.data.predictions.map((p) => (
-                <tr key={p.fight_id} className="border-b border-[var(--color-border)]/40">
-                  <td className="py-2">{p.fighter_1} <span className="text-[var(--color-muted)]">vs</span> {p.fighter_2}</td>
-                  <td className="display-num font-semibold text-base">{(p.prob_f1 * 100).toFixed(1)}%</td>
-                  <td className="display-num font-semibold text-base">{(p.prob_f2 * 100).toFixed(1)}%</td>
-                  <td className="text-xs text-[var(--color-muted)] font-mono">{p.contributing_models.join(", ")}</td>
-                </tr>
-              ))}
-              {predict.data.predictions.length === 0 && (
-                <tr><td colSpan={4} className="py-4 text-[var(--color-muted)]">No hay predicciones (peleadores sin historia).</td></tr>
-              )}
-            </tbody>
-          </table>
-        </Card>
-      )}
+      {tab === "past" && <PastEventsTab />}
+      {tab === "sessions" && <SessionsTab />}
     </div>
   );
 }

@@ -18,6 +18,12 @@ class Event(Base):
     location = Column(String(255), nullable=True)
     status = Column(String(20), nullable=False, default="scheduled")  # scheduled|completed|cancelled
     is_dwcs = Column(Boolean, nullable=False, default=False)
+    # Promotion origin. "scraped" = a real UFCStats card (UFC/DWCS), "promoted" =
+    # an upcoming UFC card, "fighter_history" = a non-UFC event (PRIDE, Strikeforce,
+    # ONE, ...) that only appears referenced in a fighter's history. Only UFC events
+    # feed the ELO/training universe — fighter_history events are excluded so ELO
+    # matches the legacy backend. See DataStoreDB._load_event_dates.
+    source = Column(String(20), nullable=True, default="scraped")
     source_url = Column(Text, nullable=True)
 
 
@@ -322,6 +328,9 @@ class HpSearchTrial(Base):
     trial_idx = Column(Integer, nullable=False)
     params = Column(JSONB, nullable=False)
     value = Column(Float, nullable=True)
+    # Per-trial CV metrics: mean_* (mean over folds, the objective space),
+    # prod_* (last/production fold), realworld_* (held-out TTA eval), is_pareto.
+    metrics = Column(JSONB, nullable=True)
     status = Column(String(20), nullable=False, default="running")
 
 

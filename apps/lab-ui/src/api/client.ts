@@ -406,6 +406,7 @@ export interface DashboardSummary {
   n_predicted_fights: number;
   n_fighters: number;
   n_models: number;
+  models: string[];
   avg_consensus_accuracy: number | null;
   avg_by_model: Record<string, DashModelAvg>;
   accuracy_by_event: DashEventAccuracy[];

@@ -59,9 +59,17 @@ def start_recalculation(event_ids: list[int] | None) -> dict:
                     ).all()
                 )
             else:
+                # Default scope = the RealWorld held-out window only (event_date >=
+                # REALWORLD_CUTOFF over real UFC cards), matching what the dashboard
+                # evaluates — not the whole scraped backtest history.
+                from datetime import timezone
+                from ufc_core.config import REALWORLD_CUTOFF_DT
+                cutoff = REALWORLD_CUTOFF_DT.replace(tzinfo=timezone.utc)
                 events = (
                     db.query(db_models.Event)
-                      .filter_by(status="completed")
+                      .filter(db_models.Event.status == "completed",
+                              db_models.Event.source.in_(("scraped", "promoted")),
+                              db_models.Event.date >= cutoff)
                       .order_by(db_models.Event.date.desc().nullslast())
                       .all()
                 )
