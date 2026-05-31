@@ -17,7 +17,11 @@ import joblib
 from ufc_core.config import MODELS_DIR, TEST_CUTOFF_DT, REALWORLD_CUTOFF_DT
 from ufc_core.db.engine import SessionLocal
 from ufc_core.db import models as db_models
+from ufc_core.features.engine import compute_fight_features
 from ufc_core.models.registry import ModelRegistry
+from ufc_core.tapology.picks_repo import (
+    load_db_picks_lookup, orient_picks_for_fight,
+)
 
 
 logger = logging.getLogger("lab-api.training")
@@ -118,11 +122,10 @@ def _build_classifier(family_key: str, feature_set: str = "", params: dict | Non
     if family_key == "CB":
         from catboost import CatBoostClassifier
         merged = {**dict(iterations=400, depth=6, learning_rate=0.05), **hp}
-        # subsample requires a non-Bayesian bootstrap in CatBoost.
-        if "subsample" in merged:
-            merged.setdefault("bootstrap_type", "Bernoulli")
+        # Match the legacy backend: don't force a bootstrap_type — CatBoost defaults to
+        # MVS, which honours subsample and tolerates bagging_temperature.
         return CatBoostClassifier(
-            **merged, verbose=False, allow_writing_files=False,
+            **merged, verbose=False, allow_writing_files=False, random_seed=42,
         )
     if family_key == "Deep":
         from lab_api.services.torch_wrap import make_deep_mlp
@@ -132,7 +135,7 @@ def _build_classifier(family_key: str, feature_set: str = "", params: dict | Non
             kw["hidden_dims"] = (
                 tuple(int(x) for x in hd.split(",")) if isinstance(hd, str) else tuple(hd)
             )
-        for k in ("epochs", "batch_size", "lr", "weight_decay", "dropout"):
+        for k in ("epochs", "batch_size", "lr", "weight_decay", "dropout", "patience"):
             if k in hp:
                 kw[k] = hp[k]
         return make_deep_mlp(**kw)
@@ -295,10 +298,16 @@ def _feature_importance(clf, feat_cols: list[str], top: int = 15) -> list[dict]:
 
 
 def _eval_metrics(model, X_test, y_test, X_train, y_train) -> dict:
-    """Held-out metrics matching the legacy backend's eval step."""
+    """Held-out metrics matching the legacy backend's eval step.
+
+    confusion_matrix is stored as sklearn's order with labels=[1, 0] so the
+    positive class (fighter_1 wins, label 1) comes first:
+        [[TP, FN],
+         [FP, TN]]   (rows = real F1/F2, cols = pred F1/F2)
+    """
     from sklearn.metrics import (
         accuracy_score, precision_score, recall_score, f1_score,
-        roc_auc_score, log_loss,
+        roc_auc_score, log_loss, confusion_matrix,
     )
     y_pred = model.predict(X_test)
     try:
@@ -315,6 +324,7 @@ def _eval_metrics(model, X_test, y_test, X_train, y_train) -> dict:
         ll = None
     acc = float(accuracy_score(y_test, y_pred))
     train_acc = float(accuracy_score(y_train, model.predict(X_train)))
+    cm = confusion_matrix(y_test, y_pred, labels=[1, 0]).tolist()
     return {
         "accuracy": round(acc, 4),
         "precision": round(float(precision_score(y_test, y_pred, zero_division=0)), 4),
@@ -324,22 +334,62 @@ def _eval_metrics(model, X_test, y_test, X_train, y_train) -> dict:
         "log_loss": round(ll, 4) if ll is not None else None,
         "train_accuracy": round(train_acc, 4),
         "overfit_gap": round(train_acc - acc, 4),
+        "confusion_matrix": cm,
+        "n_train": int(len(y_train)),
+        "n_test": int(len(y_test)),
     }
 
 
-def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0):
+def _load_realworld_odds() -> dict:
+    """Lookup {(event_name, frozenset({f1_name, f2_name})): {name: odds_american}}
+    for RealWorld fights that have both odds.
+
+    Source: the lab `fight` table (backfilled from Tapology). Uses its own short
+    read-only session so callers don't need to thread a db handle through
+    _build_realworld_df. Mirrors the Tapology-picks key shape used in
+    _build_realworld_df.
+    """
+    from sqlalchemy.orm import aliased
+    from ufc_core.db.engine import session_scope
+    from ufc_core.db import models as m
+    from ufc_core.config import REALWORLD_CUTOFF_DT
+
+    lookup: dict = {}
+    with session_scope() as db:
+        F1 = aliased(m.Fighter)
+        F2 = aliased(m.Fighter)
+        rows = (
+            db.query(
+                m.Event.name, F1.name, F2.name,
+                m.Fight.odds_f1_american, m.Fight.odds_f2_american,
+            )
+            .join(m.Event, m.Event.id == m.Fight.event_id)
+            .join(F1, F1.id == m.Fight.fighter_1_id)
+            .join(F2, F2.id == m.Fight.fighter_2_id)
+            .filter(m.Event.date >= REALWORLD_CUTOFF_DT)
+            .filter(m.Fight.odds_f1_american.isnot(None))
+            .filter(m.Fight.odds_f2_american.isnot(None))
+            .all()
+        )
+        for ev, n1, n2, o1, o2 in rows:
+            lookup[(ev, frozenset({n1, n2}))] = {n1: int(o1), n2: int(o2)}
+    return lookup
+
+
+def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0,
+                        odds_lookup: dict | None = None):
     """Build the held-out realworld DataFrame exactly like the legacy backend.
 
     Fights with event_date >= REALWORLD_CUTOFF_DT and a known result, with a
     deterministic 50/50 positional swap (seed 42), PIT-correct features
     (before_event_date = event date), and rw_label / rw_real_winner targets.
+
+    When ``odds_lookup`` is provided, each row also carries
+    ``odds_f1_american`` / ``odds_f2_american`` assigned BY FIGHTER (orientation
+    is randomized, so odds follow the name, not the column position).
     """
     import numpy as np
     import pandas as pd
-    from ufc_core.features.engine import compute_fight_features
-    from ufc_core.tapology.picks_repo import (
-        load_db_picks_lookup, orient_picks_for_fight,
-    )
 
     rng = np.random.RandomState(42)
     seen: set = set()
@@ -387,6 +437,10 @@ def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0
             row["rw_label"] = label
             row["rw_real_winner"] = winner
             row["event_date"] = ev_date
+            if odds_lookup is not None:
+                od = odds_lookup.get((ev, frozenset({f1, f2})))
+                row["odds_f1_american"] = od.get(f1) if od else None
+                row["odds_f2_american"] = od.get(f2) if od else None
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -458,6 +512,10 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
     prod_model.fit(X_full, y_full)
     fi = _feature_importance(prod_model, feat_cols)
     metrics["n_production"] = int(len(df))
+    metrics["n_features"] = int(len(feat_cols))
+    # Persist the rich pieces the model-detail screen needs (parity with the
+    # legacy backend): top feature importances + the realworld per-event breakdown.
+    metrics["feature_importance"] = fi
 
     # --- Realworld eval (held-out >= REALWORLD_CUTOFF, TTA) ---
     _set(step="realworld eval", pct=88.0)
@@ -472,6 +530,7 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
              f"acc={rw['realworld_accuracy']}")
     metrics.update({k: rw[k] for k in
                     ("realworld_accuracy", "realworld_correct", "realworld_total")})
+    metrics["realworld_events"] = rw.get("realworld_events", [])
 
     # --- Auto-register Model row (idempotent) ---
     m = db.query(db_models.Model).filter_by(short=model_short).one_or_none()
@@ -600,6 +659,7 @@ def _run_batch(jobs: list[dict]) -> None:
                     _log("Construyendo conjunto realworld…")
                     realworld_df = _build_realworld_df(
                         ds, elo_ratings, elo_pre_fight, 1500.0,
+                        odds_lookup=_load_realworld_odds(),
                     )
                     _log(f"Realworld: {len(realworld_df)} peleas "
                          f"(>= {REALWORLD_CUTOFF_DT.date()})")

@@ -60,28 +60,23 @@ def _sample_params(model_short: str, trial) -> dict:
     """Suggest a hyperparameter set for one trial. Returns JSON-serializable
     values only (persisted to hp_search_trial.params).
 
-    Ranges mirror the legacy backend's HP_SEARCH_SPACES (the legacy trainer) so
-    the lab explores the same, well-regularized regions instead of saturating
-    the train set. Two deliberate deviations from the legacy backend:
-      * CatBoost drops `bagging_temperature` (incompatible with `subsample`,
-        which needs a Bernoulli bootstrap — see _build_clf).
-      * Deep MLP keeps a moderate `epochs` range: the lab wrapper has no
-        early-stopping/patience, so the legacy backend's 150–400 would be both
-        impractically slow (one realworld refit per trial) and overfit-prone.
+    Ranges are IDENTICAL to the legacy backend's HP_SEARCH_SPACES
+    (the legacy trainer) for the four shared families, so the lab and the
+    legacy backend explore the exact same regions. Deep's `epochs`/`patience` range
+    relies on the lab wrapper's early stopping (torch_wrap._BinaryNNWrapper),
+    which mirrors the legacy backend's _train_pytorch_model.
     """
     if model_short == "XGB":
-        # Hardened vs the legacy backend: shallow trees + heavy regularization to
-        # curb XGB's tendency to memorize the train set on this dataset.
         return {
             "n_estimators": trial.suggest_int("n_estimators", 100, 500, step=50),
-            "max_depth": trial.suggest_int("max_depth", 2, 4),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "subsample": trial.suggest_float("subsample", 0.5, 0.8),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 0.7),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 5.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1.0, 20.0, log=True),
-            "min_child_weight": trial.suggest_int("min_child_weight", 5, 30),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            "max_depth": trial.suggest_int("max_depth", 3, 7),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 0.95),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.001, 5.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 15.0, log=True),
+            "min_child_weight": trial.suggest_int("min_child_weight", 2, 15),
+            "gamma": trial.suggest_float("gamma", 0.0, 3.0),
         }
     if model_short == "RF":
         return {
@@ -105,6 +100,7 @@ def _sample_params(model_short: str, trial) -> dict:
             "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 0.5, 20.0, log=True),
             "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 15, 60),
             "random_strength": trial.suggest_float("random_strength", 0.1, 10.0, log=True),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 3.0),
         }
     if model_short == "Deep":
         return {
@@ -116,7 +112,8 @@ def _sample_params(model_short: str, trial) -> dict:
             "lr": trial.suggest_float("lr", 1e-4, 5e-3, log=True),
             "weight_decay": trial.suggest_float("weight_decay", 1e-5, 5e-2, log=True),
             "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256]),
-            "epochs": trial.suggest_int("epochs", 40, 120, step=20),
+            "epochs": trial.suggest_int("epochs", 150, 400, step=50),
+            "patience": trial.suggest_int("patience", 15, 40, step=5),
         }
     raise ValueError(f"Unsupported family for HP search: {model_short}")
 
@@ -132,12 +129,10 @@ def _build_clf(model_short: str, params: dict):
         return RandomForestClassifier(n_jobs=-1, random_state=42, **params)
     if model_short == "CB":
         from catboost import CatBoostClassifier
-        p = dict(params)
-        # subsample requires a non-Bayesian bootstrap in CatBoost.
-        if "subsample" in p:
-            p.setdefault("bootstrap_type", "Bernoulli")
+        # Match the legacy backend: pass subsample + bagging_temperature as-is and let
+        # CatBoost pick the bootstrap (defaults to MVS, which honours subsample).
         return CatBoostClassifier(
-            verbose=False, allow_writing_files=False, random_seed=42, **p,
+            verbose=False, allow_writing_files=False, random_seed=42, **params,
         )
     if model_short == "Deep":
         from lab_api.services.torch_wrap import make_deep_mlp
@@ -242,10 +237,13 @@ def start_hp_search(req: dict, study_id: int) -> dict:
         from ufc_core.data_loader import DataStoreDB
         from ufc_core.config import REALWORLD_CUTOFF_DT
         from ufc_core.trainer.core import (
-            _build_dataset, _preprocess_split, evaluate_realworld, recalculate_elo,
+            _augment_35f, _build_dataset, _preprocess_split, evaluate_realworld,
+            recalculate_elo,
         )
         from ufc_core.imputer import FeatureImputer
-        from lab_api.services.training import _build_realworld_df, _resolve_feat_type
+        from lab_api.services.training import (
+            _build_realworld_df, _load_realworld_odds, _resolve_feat_type,
+        )
 
         model_short = req["model_short"]
         n_trials = int(req.get("n_trials", 50))
@@ -310,7 +308,10 @@ def start_hp_search(req: dict, study_id: int) -> dict:
             except (AttributeError, TypeError):
                 pass
 
-            realworld_df = _build_realworld_df(ds, elo_ratings, elo_pre_fight, 1500.0)
+            realworld_df = _build_realworld_df(
+                ds, elo_ratings, elo_pre_fight, 1500.0,
+                odds_lookup=_load_realworld_odds(),
+            )
             folds = _fold_definitions()
 
             study_row.status = "running"
@@ -387,7 +388,8 @@ def start_hp_search(req: dict, study_id: int) -> dict:
                 #   * realworld_*    → min_fights=0 (full set, comparable across jobs)
                 #   * realworld_mf_* → the job's own min_fights (the subset you'd
                 #     actually bet on if you applied that filter)
-                rw = {"realworld_accuracy": None, "realworld_correct": 0, "realworld_total": 0}
+                rw = {"realworld_accuracy": None, "realworld_correct": 0,
+                      "realworld_total": 0, "realworld_value": None}
                 rw_mf = {
                     "realworld_mf_accuracy": None, "realworld_mf_correct": 0,
                     "realworld_mf_total": 0, "realworld_min_fights": min_fights,
@@ -398,7 +400,13 @@ def start_hp_search(req: dict, study_id: int) -> dict:
                         feature_set=feature_set, do_augment=do_augment, scaler_type=None,
                     )
                     feat_cols = pp_full.feat_cols
+                    # Augment the production refit exactly like training._train_one_job
+                    # does, so the trial's realworld_* is a faithful preview of what
+                    # you get when you adopt and train this trial (not a model fit on
+                    # a different, un-augmented dataset).
                     full_df = df.copy()
+                    if do_augment:
+                        full_df = _augment_35f(full_df)
                     for c in feat_cols:
                         if c not in full_df.columns:
                             full_df[c] = 0
@@ -417,6 +425,7 @@ def start_hp_search(req: dict, study_id: int) -> dict:
                             "realworld_accuracy": rw_eval.get("realworld_accuracy"),
                             "realworld_correct": rw_eval.get("realworld_correct", 0),
                             "realworld_total": rw_eval.get("realworld_total", 0),
+                            "realworld_value": rw_eval.get("realworld_value"),
                         }
                         # Subset filtered by the job's min_fights (skip re-eval
                         # when it's 0 — identical to the full set).

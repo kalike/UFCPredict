@@ -20,6 +20,9 @@ const METRIC_COLS: { key: keyof NonNullable<HpTrial["metrics"]>; label: string; 
   { key: "mean_brier", label: "Brier", pct: false },
   { key: "mean_overfit", label: "Overfit", pct: false },
   { key: "mean_auc", label: "AUC", pct: true },
+  { key: "tossup_acc_col" as never, label: "Toss-up", pct: true },
+  { key: "upset_pr_col" as never, label: "Upset P/R", pct: false },
+  { key: "brier_delta_col" as never, label: "ΔBrier", pct: false },
 ];
 
 function fmt(v: number | null | undefined, pct: boolean): string {
@@ -79,15 +82,17 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
         <tbody>
           {sorted.slice(0, 60).map((t) => {
             const folds = t.metrics?.fold_accuracies ?? [];
+            const rvBuckets = t.metrics?.realworld_value?.buckets ?? [];
+            const canExpand = folds.length > 0 || rvBuckets.length > 0;
             const isOpen = expanded.has(t.trial_idx);
             const isSel = !!selected?.has(t.trial_idx);
             return (
               <Fragment key={t.trial_idx}>
                 <tr
-                  onClick={folds.length > 0 ? () => toggleExpand(t.trial_idx) : undefined}
+                  onClick={canExpand ? () => toggleExpand(t.trial_idx) : undefined}
                   className={[
                     "border-b border-border/10 hover:bg-accent/5",
-                    folds.length > 0 ? "cursor-pointer" : "",
+                    canExpand ? "cursor-pointer" : "",
                     isSel ? "bg-accent/15" : t.metrics?.is_pareto ? "bg-accent/10" : "",
                   ].join(" ")}
                 >
@@ -102,8 +107,8 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                     </td>
                   )}
                   <td className="py-1.5 px-2 font-mono whitespace-nowrap">
-                    {folds.length > 0 && (
-                      <span className="mr-1 text-accent" title="Ver accuracy por fold">
+                    {canExpand && (
+                      <span className="mr-1 text-accent" title="Ver detalle">
                         {isOpen ? "▾" : "▸"}
                       </span>
                     )}
@@ -114,6 +119,37 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                     {fmtParams(t.params)}
                   </td>
                   {METRIC_COLS.map((c) => {
+                    const rv = t.metrics?.realworld_value;
+                    if (c.key === ("tossup_acc_col" as never)) {
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {rv ? fmt(rv.tossup_accuracy, true) : "—"}
+                          {rv && rv.tossup_n > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({rv.tossup_n})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("upset_pr_col" as never)) {
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {rv ? `${fmt(rv.upset_precision, true)} / ${fmt(rv.upset_recall, true)}` : "—"}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("brier_delta_col" as never)) {
+                      return (
+                        <td
+                          key={c.key}
+                          className={[
+                            "py-1.5 px-2 text-right whitespace-nowrap display-num font-medium",
+                            rv ? (rv.brier_delta < 0 ? "text-success" : "text-destructive") : "",
+                          ].join(" ")}
+                        >
+                          {rv ? `${rv.brier_delta >= 0 ? "+" : ""}${rv.brier_delta.toFixed(4)}` : "—"}
+                        </td>
+                      );
+                    }
                     if (c.key === "realworld_accuracy" || c.key === "realworld_mf_accuracy") {
                       const isMf = c.key === "realworld_mf_accuracy";
                       const acc = isMf ? t.metrics?.realworld_mf_accuracy : t.metrics?.realworld_accuracy;
@@ -143,31 +179,64 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                     );
                   })}
                 </tr>
-                {isOpen && folds.length > 0 && (
+                {isOpen && canExpand && (
                   <tr className="bg-background/40 border-b border-border/10">
-                    <td colSpan={colSpan} className="py-2 px-4">
-                      <div className="flex flex-wrap gap-2">
-                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground self-center mr-1">
-                          Accuracy por fold (validación temporal):
-                        </span>
-                        {folds.map((f, i) => (
-                          <span
-                            key={i}
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-card border border-border text-[11px]"
-                            title={`${f.n_val} peleas de validación`}
-                          >
-                            <span className="text-muted-foreground font-mono">{f.label}</span>
-                            <span className="display-num font-semibold text-foreground">
-                              {(f.accuracy * 100).toFixed(1)}%
-                            </span>
-                            {f.train_accuracy != null && (
-                              <span className="display-num text-muted-foreground">
-                                (train {(f.train_accuracy * 100).toFixed(1)}%)
-                              </span>
-                            )}
+                    <td colSpan={colSpan} className="py-2 px-4 space-y-2">
+                      {folds.length > 0 && (
+                        <div className="flex flex-wrap gap-2">
+                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground self-center mr-1">
+                            Accuracy por fold (validación temporal):
                           </span>
-                        ))}
-                      </div>
+                          {folds.map((f, i) => (
+                            <span
+                              key={i}
+                              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-card border border-border text-[11px]"
+                              title={`${f.n_val} peleas de validación`}
+                            >
+                              <span className="text-muted-foreground font-mono">{f.label}</span>
+                              <span className="display-num font-semibold text-foreground">
+                                {(f.accuracy * 100).toFixed(1)}%
+                              </span>
+                              {f.train_accuracy != null && (
+                                <span className="display-num text-muted-foreground">
+                                  (train {(f.train_accuracy * 100).toFixed(1)}%)
+                                </span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {rvBuckets.length > 0 && (
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                            Valor por bucket de odds (RealWorld):
+                          </span>
+                          <table className="w-full text-[11px] mt-1">
+                            <thead>
+                              <tr className="text-muted-foreground border-b border-border/30">
+                                <th className="text-left py-0.5 px-2">Bucket (fav no-vig)</th>
+                                <th className="text-right py-0.5 px-2">Peleas</th>
+                                <th className="text-right py-0.5 px-2">Acc modelo</th>
+                                <th className="text-right py-0.5 px-2">% upset real</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rvBuckets.map((b) => (
+                                <tr key={b.label} className="border-b border-border/10">
+                                  <td className="py-0.5 px-2 text-foreground">{b.label}</td>
+                                  <td className="py-0.5 px-2 text-right display-num">{b.n}</td>
+                                  <td className="py-0.5 px-2 text-right display-num">
+                                    {b.model_accuracy != null ? `${(b.model_accuracy * 100).toFixed(1)}%` : "—"}
+                                  </td>
+                                  <td className="py-0.5 px-2 text-right display-num text-muted-foreground">
+                                    {b.upset_rate != null ? `${(b.upset_rate * 100).toFixed(1)}%` : "—"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )}

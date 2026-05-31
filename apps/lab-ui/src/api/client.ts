@@ -22,6 +22,7 @@ export type VersionInfo = {
   version_idx: number; feature_set: string; artifact_uri: string;
   metrics_json: Record<string, unknown> | null;
   hp_json: Record<string, unknown> | null;
+  trained_at: string | null;
   starred: boolean; was_production: boolean; note: string | null;
 };
 export type RealworldFight = {
@@ -29,8 +30,39 @@ export type RealworldFight = {
   predicted_winner: string; real_winner: string; correct: boolean;
 };
 export type RealworldEvent = {
-  event: string; correct: number; total: number; fights: RealworldFight[];
+  event: string; date?: string | null; correct: number; total: number; fights: RealworldFight[];
 };
+export type FeatureImportance = { feature: string; importance: number };
+export type RealworldValueBucket = {
+  label: string; lo: number; hi: number | null; n: number;
+  model_accuracy: number | null; upset_rate: number | null;
+};
+export type RealworldValue = {
+  tossup_threshold: number; n_with_odds: number;
+  tossup_n: number; tossup_accuracy: number | null; tossup_edge: number | null;
+  underdog_pick_n: number; underdog_pick_hits: number; upset_precision: number | null;
+  upset_total: number; upset_detected: number; upset_recall: number | null;
+  brier_model: number; brier_market: number; brier_delta: number;
+  logloss_model: number; logloss_market: number; logloss_delta: number;
+  buckets: RealworldValueBucket[];
+};
+// Shape of model_version.metrics_json. All optional: older versions may lack
+// the richer pieces (confusion_matrix / feature_importance / realworld_events)
+// until backfilled or retrained. Cast metrics_json via asModelMetrics().
+export type ModelMetrics = {
+  accuracy?: number; precision?: number; recall?: number; f1?: number;
+  auc?: number | null; log_loss?: number | null;
+  train_accuracy?: number; overfit_gap?: number;
+  confusion_matrix?: number[][] | null;
+  n_train?: number; n_test?: number; n_features?: number; n_production?: number;
+  realworld_accuracy?: number | null; realworld_correct?: number; realworld_total?: number;
+  realworld_events?: RealworldEvent[];
+  feature_importance?: FeatureImportance[] | null;
+  realworld_value?: RealworldValue | null;
+};
+export function asModelMetrics(m: Record<string, unknown> | null | undefined): ModelMetrics | null {
+  return (m ?? null) as ModelMetrics | null;
+}
 export type TrainResult = {
   model_short: string; job_label: string; dataset: string | null;
   accuracy: number | null; log_loss: number | null;
@@ -80,6 +112,7 @@ export type HpTrialMetrics = {
   realworld_mf_accuracy?: number | null; realworld_mf_correct?: number;
   realworld_mf_total?: number; realworld_min_fights?: number;
   is_pareto: boolean;
+  realworld_value?: RealworldValue | null;
 };
 export type HpTrial = {
   id: number; study_id: number; trial_idx: number;
