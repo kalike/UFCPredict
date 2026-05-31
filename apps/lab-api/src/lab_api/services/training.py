@@ -95,29 +95,47 @@ def _job_label(job: dict) -> str:
     return " | ".join(str(p) for p in parts)
 
 
-def _build_classifier(family_key: str, feature_set: str = ""):
-    """Return an unfitted classifier for one of the four canonical families."""
+def _build_classifier(family_key: str, feature_set: str = "", params: dict | None = None):
+    """Return an unfitted classifier for one of the four canonical families.
+
+    `params` (e.g. an adopted HP-search trial) overrides the family defaults.
+    """
+    hp = dict(params or {})
     if family_key == "XGB":
         from xgboost import XGBClassifier
+        defaults = dict(n_estimators=400, learning_rate=0.05, max_depth=6)
         return XGBClassifier(
-            n_estimators=400, learning_rate=0.05, max_depth=6,
+            **{**defaults, **hp},
             n_jobs=-1, eval_metric="logloss", verbosity=0,
         )
     if family_key == "RF":
         from sklearn.ensemble import RandomForestClassifier
+        defaults = dict(n_estimators=400, max_depth=None, min_samples_split=5,
+                        min_samples_leaf=2)
         return RandomForestClassifier(
-            n_estimators=400, max_depth=None, min_samples_split=5,
-            min_samples_leaf=2, n_jobs=-1, random_state=42,
+            **{**defaults, **hp}, n_jobs=-1, random_state=42,
         )
     if family_key == "CB":
         from catboost import CatBoostClassifier
+        merged = {**dict(iterations=400, depth=6, learning_rate=0.05), **hp}
+        # subsample requires a non-Bayesian bootstrap in CatBoost.
+        if "subsample" in merged:
+            merged.setdefault("bootstrap_type", "Bernoulli")
         return CatBoostClassifier(
-            iterations=400, depth=6, learning_rate=0.05,
-            verbose=False, allow_writing_files=False,
+            **merged, verbose=False, allow_writing_files=False,
         )
     if family_key == "Deep":
         from lab_api.services.torch_wrap import make_deep_mlp
-        return make_deep_mlp(epochs=40, batch_size=64, lr=1e-3)
+        kw: dict = dict(epochs=40, batch_size=64, lr=1e-3)
+        if "hidden_dims" in hp:
+            hd = hp["hidden_dims"]
+            kw["hidden_dims"] = (
+                tuple(int(x) for x in hd.split(",")) if isinstance(hd, str) else tuple(hd)
+            )
+        for k in ("epochs", "batch_size", "lr", "weight_decay", "dropout"):
+            if k in hp:
+                kw[k] = hp[k]
+        return make_deep_mlp(**kw)
     raise ValueError(f"No builder for family_key={family_key}")
 
 
@@ -319,10 +337,18 @@ def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0
     import numpy as np
     import pandas as pd
     from ufc_core.features.engine import compute_fight_features
+    from ufc_core.tapology.picks_repo import (
+        load_db_picks_lookup, orient_picks_for_fight,
+    )
 
     rng = np.random.RandomState(42)
     seen: set = set()
     rows: list[dict] = []
+    # Load Tapology picks once (DB-only; empty dict in file mode). Critical for
+    # feature_set='v7': without this every held-out fight gets neutral tap_*
+    # imputation while training rows have the real values, so the model's
+    # strongest signal is dead at eval time and realworld_accuracy collapses.
+    tapology_picks_by_key = load_db_picks_lookup()
     for ftr in ds.fighters_raw:
         fname = ftr["name"]
         for fight in ftr.get("fights", []):
@@ -343,6 +369,8 @@ def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0
                 f1, f2, label = winner, loser, 1.0
             else:
                 f1, f2, label = loser, winner, 0.0
+            picks_entry = tapology_picks_by_key.get((ev, frozenset({f1, f2})))
+            picks = orient_picks_for_fight(picks_entry, f1) if picks_entry else None
             row = compute_fight_features(
                 f1_name=f1, f2_name=f2,
                 fighter_histories=ds.fighter_histories,
@@ -351,6 +379,7 @@ def _build_realworld_df(ds, elo_ratings, elo_pre_fight, base_elo: float = 1500.0
                 event=ev,
                 elo_pre_fight=elo_pre_fight, elo_ratings=elo_ratings, base_elo=base_elo,
                 before_event_date=ev_date, event_date=ev_date,  # PIT
+                tapology_picks=picks,
             )
             if row is None:
                 continue
@@ -380,6 +409,7 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
     dataset_key = job.get("dataset", "since2010")
     min_fights = int(job.get("min_fights") or 0)
     do_augment = job.get("augment") is True
+    hp_params = job.get("hp_params") or None  # adopted HP-search trial params
     label = _job_label(job)
     if model_short not in SUPPORTED:
         raise ValueError(
@@ -407,7 +437,7 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
 
     # --- Held-out eval model (train only) ---
     _set(step=f"training {model_short} (holdout)", pct=45.0)
-    eval_model = _build_classifier(model_short, feature_set)
+    eval_model = _build_classifier(model_short, feature_set, params=hp_params)
     eval_model.fit(pp.X_train, pp.y_train)
     _set(step="evaluating (test-val)", pct=65.0)
     metrics = _eval_metrics(eval_model, pp.X_test, pp.y_test, pp.X_train, pp.y_train)
@@ -424,7 +454,7 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
     full_imp = pp.transformer.transform_df(imputer_prod.transform(full_df))
     X_full = full_imp[feat_cols].values.astype(np.float32)
     y_full = full_df["result"].values.astype(np.float32)
-    prod_model = _build_classifier(model_short, feature_set)
+    prod_model = _build_classifier(model_short, feature_set, params=hp_params)
     prod_model.fit(X_full, y_full)
     fi = _feature_importance(prod_model, feat_cols)
     metrics["n_production"] = int(len(df))
@@ -475,13 +505,18 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
 
     # --- Register version ---
     reg = ModelRegistry(db)
+    origin = job.get("origin") or "retrain"
     v_idx = reg.register_version(
         short=model_short, feature_set=feature_set,
         hp_json={"dataset": dataset_key, "feat_count": len(feat_cols),
                  "min_fights": min_fights, "augment": do_augment,
-                 "feat_type": feat_type, "use_pit": bool(job.get("use_pit"))},
+                 "feat_type": feat_type, "use_pit": bool(job.get("use_pit")),
+                 "origin": origin,
+                 # delta_win_streak uses the odd clip_sym_6 override for 35f.
+                 "delta_overrides": (feat_type == "35f"),
+                 **({"hp_params": hp_params} if hp_params else {})},
         metrics_json=metrics, artifact_uri=f"file://{artifact_path}",
-        note=f"Trained by lab-api (retrain): {label}",
+        note=f"Trained by lab-api ({origin}): {label}",
     )
     v = (
         db.query(db_models.ModelVersion)

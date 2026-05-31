@@ -19,11 +19,45 @@ import EventResultsPanel from "../components/dashboard/EventResultsPanel";
 
 export default function Dashboard() {
   const [minFights, setMinFights] = useState(0);
-  const { data, isLoading } = useDashboard(minFights);
+  const { data, isLoading, isError, error, refetch } = useDashboard(minFights);
   const invalidate = useInvalidateDashboard();
   const recalc = useRecalculationStatus(invalidate.isPending || false);
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [specialTier, setSpecialTier] = useState<string | null>(null);
+
+  // Reusable controls bar (does not depend on `data`, so it stays accessible
+  // during error states to let the user recover, e.g. lower "Min peleas").
+  const controls = (
+    <div className="flex items-center gap-3">
+      <label className="text-xs text-muted-foreground">Min peleas</label>
+      <Input type="number" value={minFights}
+             onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
+             className="w-20" />
+      <Button variant="primary" disabled={invalidate.isPending}
+              onClick={() => invalidate.mutate(minFights)}>
+        Actualizar
+      </Button>
+      {invalidate.isPending && recalc.data?.is_running && (
+        <span className="text-xs text-muted-foreground">{recalc.data.step}</span>
+      )}
+    </div>
+  );
+
+  if (isError) {
+    return (
+      <div className="space-y-5">
+        <PageHeader title="Dashboard" subtitle="Accuracy de modelos y eventos" />
+        {controls}
+        <div className="bg-card border border-destructive/40 rounded-xl p-6 space-y-3">
+          <p className="text-destructive font-semibold">No se pudo cargar el dashboard</p>
+          <p className="text-xs text-muted-foreground">
+            {error instanceof Error ? error.message : "Error desconocido al consultar /api/dashboard."}
+          </p>
+          <Button variant="primary" onClick={() => refetch()}>Reintentar</Button>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !data) {
     return (
@@ -37,25 +71,15 @@ export default function Dashboard() {
     );
   }
 
-  const modelShorts = DASHBOARD_MODEL_ORDER.filter((s) => s in data.avg_by_model);
+  const modelShorts = data.models?.length
+    ? data.models
+    : DASHBOARD_MODEL_ORDER.filter((s) => s in data.avg_by_model);
   const pastEvents = data.accuracy_by_event.filter((e) => e.is_past);
 
   return (
     <div className="space-y-5">
       <PageHeader title="Dashboard" subtitle="Accuracy de modelos y eventos" />
-      <div className="flex items-center gap-3">
-        <label className="text-xs text-muted-foreground">Min peleas</label>
-        <Input type="number" value={minFights}
-               onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
-               className="w-20" />
-        <Button variant="primary" disabled={invalidate.isPending}
-                onClick={() => invalidate.mutate(minFights)}>
-          Actualizar
-        </Button>
-        {invalidate.isPending && recalc.data?.is_running && (
-          <span className="text-xs text-muted-foreground">{recalc.data.step}</span>
-        )}
-      </div>
+      {controls}
 
       <StatGrid data={data} />
       <ConsensusTierGrid tiers={data.consensus_tiers} />

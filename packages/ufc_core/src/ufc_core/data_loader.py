@@ -106,18 +106,35 @@ class DataStoreDB(BaseDataStore):
         )
 
     def _load_event_dates(self, db: Session) -> None:
-        """Load events from the ``event`` table -> event_dates + event_locations."""
+        """Load events from the ``event`` table -> event_dates + event_locations.
+
+        Non-UFC events (``source == "fighter_history"``: PRIDE, Strikeforce, ONE,
+        ...) are excluded from ``event_dates`` so the ELO/training universe is
+        UFC-only, matching the legacy backend. Because ``event_dates`` is the
+        single gate consulted by recalculate_elo and _build_dataset (a fight whose
+        event is absent here is skipped), excluding them here makes ELO, the
+        ranking and the training datasets all UFC-only in one place.
+        """
         rows = db.execute(select(Event).order_by(Event.date.desc().nulls_last())).scalars().all()
 
         self.event_dates = {}
         self.event_locations = {}
+        excluded_non_ufc = 0
         for ev in rows:
+            # preview = ad-hoc user matchups not yet promoted; no real results,
+            # must not leak into PIT date lookups or the ELO/training universe.
+            if ev.source in ("fighter_history", "preview"):
+                excluded_non_ufc += 1
+                continue
             if ev.date:
                 self.event_dates[ev.name] = ev.date.replace(tzinfo=None)
             if ev.location:
                 self.event_locations[ev.name] = ev.location
 
-        logger.info(f"  DB -> {len(self.event_dates)} event dates loaded")
+        logger.info(
+            "  DB -> %d event dates loaded (%d non-UFC events excluded)",
+            len(self.event_dates), excluded_non_ufc,
+        )
 
     def _load_fight_cards(self, db: Session) -> None:
         """Load saved fight cards.
