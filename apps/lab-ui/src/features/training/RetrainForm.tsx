@@ -55,7 +55,7 @@ export function RetrainForm({
   const [minFights, setMinFights] = useState<number[]>([0]);
   const [featTypes, setFeatTypes] = useState<Set<FeatTypeKey>>(new Set(["auto"]));
   const [featureSet, setFeatureSet] = useState<FeatureSetKey>("v7");
-  const [usePit, setUsePit] = useState(false);
+  const [usePit, setUsePit] = useState(true);
   const [removed, setRemoved] = useState<Set<string>>(new Set());
 
   // Cartesian product of the multi-select dimensions → one job each.
