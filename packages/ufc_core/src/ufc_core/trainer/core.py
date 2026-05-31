@@ -1102,7 +1102,12 @@ def evaluate_realworld(
         predicted_winner = f1 if pred == 1 else f2
 
         if ev not in rw_events:
-            rw_events[ev] = {"correct": 0, "total": 0, "fights": []}
+            ed = rw.iloc[idx].get("event_date")
+            try:
+                ed_iso = ed.isoformat() if ed is not None else None
+            except AttributeError:
+                ed_iso = str(ed) if ed is not None else None
+            rw_events[ev] = {"correct": 0, "total": 0, "fights": [], "date": ed_iso}
         rw_events[ev]["total"] += 1
         if correct:
             rw_events[ev]["correct"] += 1
@@ -1114,15 +1119,35 @@ def evaluate_realworld(
             "correct": correct,
         })
 
-    return {
+    # Newest first (events without a date sink to the end).
+    events_out = [
+        {"event": ev, "date": d.get("date"),
+         "correct": d["correct"], "total": d["total"], "fights": d["fights"]}
+        for ev, d in rw_events.items()
+    ]
+    events_out.sort(key=lambda e: (e["date"] is not None, e["date"] or ""), reverse=True)
+
+    result = {
         "realworld_accuracy": rw_acc,
         "realworld_correct": rw_correct,
         "realworld_total": rw_total,
-        "realworld_events": [
-            {"event": ev, "correct": d["correct"], "total": d["total"], "fights": d["fights"]}
-            for ev, d in rw_events.items()
-        ],
+        "realworld_events": events_out,
     }
+
+    # Value-vs-market metrics, only when the held-out df carries odds (RealWorld
+    # window; backfilled from Tapology). Aligned with proba_rw / y_rw post-filter.
+    if "odds_f1_american" in rw.columns and "odds_f2_american" in rw.columns:
+        import pandas as pd
+        from ufc_core.trainer.value_metrics import compute_value_metrics
+        rv = compute_value_metrics(
+            proba_rw, y_rw,
+            pd.to_numeric(rw["odds_f1_american"], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(rw["odds_f2_american"], errors="coerce").to_numpy(dtype=float),
+        )
+        if rv is not None:
+            result["realworld_value"] = rv
+
+    return result
 
 
 

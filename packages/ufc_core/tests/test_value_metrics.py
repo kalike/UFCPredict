@@ -77,3 +77,44 @@ def test_buckets_partition_all_fights():
     )
     assert [b["n"] for b in out["buckets"]] == [1, 1, 1, 1]
     assert sum(b["n"] for b in out["buckets"]) == out["n_with_odds"]
+
+
+def test_evaluate_realworld_attaches_value_when_odds_present():
+    """evaluate_realworld must add 'realworld_value' iff the df carries odds.
+
+    Builds a tiny 35f realworld_df + a trivial logistic model so the call path
+    (impute -> transform -> TTA -> value metrics) runs end to end.
+    """
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from ufc_core.imputer import FeatureImputer
+    from ufc_core.trainer.core import evaluate_realworld, REALWORLD_CUTOFF_DT
+
+    feat_cols = ["delta_a", "delta_b"]
+    rows = []
+    for i in range(6):
+        rows.append({
+            "delta_a": float(i - 3), "delta_b": float(3 - i),
+            "rw_label": float(i % 2),
+            "rw_real_winner": "F1" if i % 2 else "F2",
+            "fighter_1": "F1", "fighter_2": "F2", "event": f"E{i}",
+            "event_date": REALWORLD_CUTOFF_DT.replace(year=2025, month=6, day=1),
+            "f1_total_fights": 5, "f2_total_fights": 5,
+            "odds_f1_american": -110.0, "odds_f2_american": -110.0,
+        })
+    df = pd.DataFrame(rows)
+    imputer = FeatureImputer().fit(df, feat_cols)
+    model = LogisticRegression().fit(df[feat_cols].values, df["rw_label"].values)
+
+    out = evaluate_realworld(model, None, imputer, feat_cols, df, is_pytorch=False, min_fights=0)
+    assert "realworld_value" in out
+    assert out["realworld_value"]["n_with_odds"] == 6
+    assert out["realworld_value"]["tossup_threshold"] == 0.55
+
+    # Without odds columns -> no realworld_value key.
+    out2 = evaluate_realworld(
+        model, None, imputer, feat_cols,
+        df.drop(columns=["odds_f1_american", "odds_f2_american"]),
+        is_pytorch=False, min_fights=0,
+    )
+    assert "realworld_value" not in out2
