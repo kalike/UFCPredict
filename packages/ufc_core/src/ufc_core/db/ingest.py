@@ -34,6 +34,17 @@ def _slug(name: str) -> str:
     return name.lower().replace(" ", "-")
 
 
+def is_dwcs_event(name: str | None) -> bool:
+    """True if an event name denotes Dana White's Contender Series.
+
+    Single source of truth for the DWCS flag (parity with the legacy backend's
+    the legacy dashboard helper). Used both at ingest time
+    (to stamp Event.is_dwcs) and by a backfill script.
+    """
+    e = (name or "").lower()
+    return "dwcs" in e or "contender series" in e
+
+
 _RECORD_TRIPLET_RE = re.compile(r"(\d+)-(\d+)-(\d+)")
 
 
@@ -164,11 +175,15 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                     name=ev_name,
                     date=_parse_date_loose(fight.get("date")),
                     status="completed",
+                    is_dwcs=is_dwcs_event(ev_name),
                 )
                 db.add(event)
                 db.flush()
                 event_by_name[ev_name] = event
                 events_new += 1
+            elif event.is_dwcs != is_dwcs_event(ev_name):
+                # Keep the flag correct for events created before this was wired.
+                event.is_dwcs = is_dwcs_event(ev_name)
 
             opp_name = fight.get("opponent")
             if not opp_name:
