@@ -1,7 +1,22 @@
 """End-to-end smoke for lab-api: register a model → train (stub) → activate → list."""
 
+import time
+
 import pytest
 from ufc_core.db import Base, models as db_models
+
+
+def _wait_idle(client, status_path: str, timeout: float = 60.0) -> dict:
+    """Poll a worker status endpoint until is_running=False. The smoke test
+    launches real background jobs; returning while they run poisons later
+    tests (the single-tenant workers reject new jobs)."""
+    deadline = time.time() + timeout
+    status = client.get(status_path).json()
+    while status["is_running"] and time.time() < deadline:
+        time.sleep(0.2)
+        status = client.get(status_path).json()
+    assert not status["is_running"], f"{status_path} still running after {timeout}s: {status}"
+    return status
 
 
 def _seed_model(client):
@@ -54,9 +69,11 @@ def test_full_flow_register_train_activate_publish(client):
     assert r.status_code == 200
     assert r.json()["started"] in (True, False)
 
-    # 6) Training status
+    # 6) Training status — wait for the background job to finish so the
+    #    single-tenant worker is free for later tests
     r = client.get("/api/models/train/status")
     assert r.status_code == 200
+    _wait_idle(client, "/api/models/train/status")
 
     # 7) HP search start + listing
     r = client.post("/api/hp-search/start",
@@ -67,10 +84,12 @@ def test_full_flow_register_train_activate_publish(client):
     r = client.get("/api/hp-search/studies")
     assert r.status_code == 200
     assert len(r.json()) >= 1
+    _wait_idle(client, "/api/hp-search/status")
 
     # 8) Combo search start
     r = client.post("/api/combo-search/start", json={"name": "smoke-combo"})
     assert r.status_code == 200
+    _wait_idle(client, "/api/combo-search/status")
 
     # 9) Predictions / events listing
     r = client.get("/api/predictions/events")

@@ -1004,7 +1004,10 @@ def evaluate_realworld(
     """
     from ufc_core.transforms import FeatureTransformer
 
-    transformer = FeatureTransformer(enabled=True)
+    # 35f (delta_*) opts into the odd clip_sym_6 override so the negation-based
+    # TTA flip below (-X) matches what the model trained on. 52f keeps defaults.
+    is_52f = any(c.startswith("f1_") for c in feat_cols)
+    transformer = FeatureTransformer(enabled=True, delta_overrides=not is_52f)
     rw = realworld_df.copy()
 
     # Defensive filter: realworld is strictly event_date >= REALWORLD_CUTOFF_DT.
@@ -1050,7 +1053,6 @@ def evaluate_realworld(
         X_rw_sc = X_rw
 
     # TTA flip: negate for 35f (delta_*), swap halves for 52f (f1_*/f2_*)
-    is_52f = any(c.startswith("f1_") for c in feat_cols)
     if is_52f:
         n_half = sum(1 for c in feat_cols if c.startswith("f1_"))
         X_rw_flip = np.hstack([X_rw[:, n_half:], X_rw[:, :n_half]])
@@ -1100,7 +1102,12 @@ def evaluate_realworld(
         predicted_winner = f1 if pred == 1 else f2
 
         if ev not in rw_events:
-            rw_events[ev] = {"correct": 0, "total": 0, "fights": []}
+            ed = rw.iloc[idx].get("event_date")
+            try:
+                ed_iso = ed.isoformat() if ed is not None else None
+            except AttributeError:
+                ed_iso = str(ed) if ed is not None else None
+            rw_events[ev] = {"correct": 0, "total": 0, "fights": [], "date": ed_iso}
         rw_events[ev]["total"] += 1
         if correct:
             rw_events[ev]["correct"] += 1
@@ -1112,15 +1119,35 @@ def evaluate_realworld(
             "correct": correct,
         })
 
-    return {
+    # Newest first (events without a date sink to the end).
+    events_out = [
+        {"event": ev, "date": d.get("date"),
+         "correct": d["correct"], "total": d["total"], "fights": d["fights"]}
+        for ev, d in rw_events.items()
+    ]
+    events_out.sort(key=lambda e: (e["date"] is not None, e["date"] or ""), reverse=True)
+
+    result = {
         "realworld_accuracy": rw_acc,
         "realworld_correct": rw_correct,
         "realworld_total": rw_total,
-        "realworld_events": [
-            {"event": ev, "correct": d["correct"], "total": d["total"], "fights": d["fights"]}
-            for ev, d in rw_events.items()
-        ],
+        "realworld_events": events_out,
     }
+
+    # Value-vs-market metrics, only when the held-out df carries odds (RealWorld
+    # window; backfilled from Tapology). Aligned with proba_rw / y_rw post-filter.
+    if "odds_f1_american" in rw.columns and "odds_f2_american" in rw.columns:
+        import pandas as pd
+        from ufc_core.trainer.value_metrics import compute_value_metrics
+        rv = compute_value_metrics(
+            proba_rw, y_rw,
+            pd.to_numeric(rw["odds_f1_american"], errors="coerce").to_numpy(dtype=float),
+            pd.to_numeric(rw["odds_f2_american"], errors="coerce").to_numpy(dtype=float),
+        )
+        if rv is not None:
+            result["realworld_value"] = rv
+
+    return result
 
 
 
@@ -1472,8 +1499,9 @@ def _preprocess_split(
     train_imputed = imputer.transform(train_df)
     test_imputed = imputer.transform(test_df)
 
-    # 5. Transform
-    transformer = FeatureTransformer(enabled=True)
+    # 5. Transform — 35f opts into the odd clip_sym_6 for delta_win_streak so it
+    # keeps its sign and stays TTA-symmetric (52f has no delta_ cols → no-op).
+    transformer = FeatureTransformer(enabled=True, delta_overrides=(feat_type == "35f"))
     train_imputed = transformer.transform_df(train_imputed)
     test_imputed = transformer.transform_df(test_imputed)
 

@@ -13,13 +13,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 BASE_ELO: float = float(os.environ.get("BASE_ELO", "1500"))
 TEMPERATURE: float = float(os.environ.get("TEMPERATURE_SCALING", "1.0"))
 TEST_CUTOFF_DATE: str = os.environ.get("TEST_CUTOFF_DATE", "2024-01-01")
-REALWORLD_CUTOFF_DATE: str = os.environ.get("REALWORLD_CUTOFF_DATE", "2025-09-01")
+REALWORLD_CUTOFF_DATE: str = os.environ.get("REALWORLD_CUTOFF_DATE", "2025-05-01")
 
 # Paths
 MODELS_DIR = DATA_DIR / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 ELO_RATINGS_PATH = DATA_DIR / "elo_ratings.json"
+
+# Fighter headshots downloaded by scrapers/fotos.py ({Name_With_Underscores}.png)
+FOTOS_DIR = DATA_DIR / "fotos"
 
 # Datetime parsed versions for comparisons
 REALWORLD_CUTOFF_DT = datetime.strptime(REALWORLD_CUTOFF_DATE, "%Y-%m-%d")

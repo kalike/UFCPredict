@@ -1,86 +1,197 @@
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import { Card, PageHeader, Button, Input, Badge } from "../components/ui";
+import { Card, PageHeader } from "../components/ui";
+import { HpSearchForm, type HpJob } from "../components/hp/HpSearchForm";
+import { HpSearchMonitor } from "../components/hp/HpSearchMonitor";
+import { HpStudyResults } from "../components/hp/HpStudyResults";
+import { TrainingMonitor } from "../components/hp/TrainingMonitor";
+import { useHpStatus, useHpStudies } from "../components/hp/useHpSearch";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function HpSearchPage() {
   const qc = useQueryClient();
-  const [short, setShort] = useState("");
-  const [nTrials, setNTrials] = useState("50");
-  const studies = useQuery({ queryKey: ["hp-studies"], queryFn: api.hpStudies });
-  const status = useQuery({
-    queryKey: ["hp-status"],
-    queryFn: api.hpStatus,
-    refetchInterval: (q) => (q.state.data?.is_running ? 1000 : 5000),
-  });
-  const start = useMutation({
-    mutationFn: () => api.hpStart({ model_short: short, n_trials: Number(nTrials) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["hp-studies"] });
-      qc.invalidateQueries({ queryKey: ["hp-status"] });
-    },
+  const trainable = useQuery({ queryKey: ["trainable"], queryFn: api.trainable });
+  const studies = useHpStudies();
+
+  const [queueActive, setQueueActive] = useState(false);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [queueTotal, setQueueTotal] = useState(0);
+  const [currentNTrials, setCurrentNTrials] = useState(0);
+  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [adopting, setAdopting] = useState(false);
+  const [showTraining, setShowTraining] = useState(false);
+  const runningRef = useRef(false);
+
+  const status = useHpStatus();
+
+  const trainStatus = useQuery({
+    queryKey: ["train-status"],
+    queryFn: api.trainStatus,
+    refetchInterval: (q) => (adopting || q.state.data?.is_running ? 1500 : false),
   });
 
+  // Adoption finished once training is no longer running.
+  useEffect(() => {
+    if (adopting && trainStatus.data && !trainStatus.data.is_running) {
+      setAdopting(false);
+      qc.invalidateQueries({ queryKey: ["hp-studies"] });
+    }
+  }, [adopting, trainStatus.data, qc]);
+
+  const trainRunning = !!trainStatus.data?.is_running;
+  const busy = queueActive || !!status.data?.is_running || adopting || trainRunning;
+
+  async function onDeleteStudy(studyId: number) {
+    setLaunchError(null);
+    try {
+      await api.hpDeleteStudy(studyId);
+      qc.invalidateQueries({ queryKey: ["hp-studies"] });
+    } catch (e) {
+      setLaunchError(e instanceof Error ? e.message : "No se pudo eliminar el job");
+    }
+  }
+
+  async function onDeleteManyStudies(studyIds: number[]) {
+    setLaunchError(null);
+    try {
+      await api.hpDeleteStudiesBatch(studyIds);
+      qc.invalidateQueries({ queryKey: ["hp-studies"] });
+    } catch (e) {
+      setLaunchError(e instanceof Error ? e.message : "No se pudieron eliminar los jobs");
+    }
+  }
+
+  async function onAdopt(studyId: number, trialIdxs: number[]) {
+    setLaunchError(null);
+    setAdopting(true);
+    setShowTraining(true);
+    try {
+      const res = await api.hpAdopt(trialIdxs.map((i) => ({ study_id: studyId, trial_idx: i })));
+      if (!res.started) {
+        setAdopting(false);
+        setLaunchError(res.message ?? "No se pudo lanzar el entrenamiento");
+      } else {
+        qc.invalidateQueries({ queryKey: ["train-status"] });
+      }
+    } catch (e) {
+      setAdopting(false);
+      setLaunchError(e instanceof Error ? e.message : "Error al adoptar trials");
+    }
+  }
+
+  // Wait until the given study has started and then finished.
+  async function waitUntilDone(studyId: number | null) {
+    for (let tries = 0; tries < 4000; tries++) {
+      await sleep(1000);
+      const s = await api.hpStatus();
+      qc.setQueryData(["hp-status"], s);
+      if (studyId != null && s.study_id === studyId && !s.is_running) return;
+      // Defensive: a different study finished or nothing is running after a grace period.
+      if (!s.is_running && tries > 3) return;
+    }
+  }
+
+  async function runQueue(jobs: HpJob[]) {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    setQueueActive(true);
+    setQueueTotal(jobs.length);
+    setLaunchError(null);
+    try {
+      for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        setQueueIndex(i);
+        setCurrentNTrials(job.n_trials);
+        const res = await api.hpStart({
+          model_short: job.model,
+          feature_set: job.feature_set,
+          feat_type: job.feat_type,
+          dataset: job.dataset,
+          min_fights: job.min_fights,
+          n_trials: job.n_trials,
+          objectives: job.objectives,
+          overfit_penalty: job.overfit_penalty,
+        });
+        if (!res.started) {
+          setLaunchError(res.message ?? `No se pudo iniciar ${job.model}`);
+          continue;
+        }
+        await waitUntilDone(res.study_id);
+        qc.invalidateQueries({ queryKey: ["hp-studies"] });
+      }
+    } catch (e) {
+      setLaunchError(e instanceof Error ? e.message : "Error lanzando la cola");
+    } finally {
+      runningRef.current = false;
+      setQueueActive(false);
+      qc.invalidateQueries({ queryKey: ["hp-studies"] });
+    }
+  }
+
   return (
-    <div>
-      <PageHeader title="HP Search" subtitle="Optuna · LGBM / XGB" />
-      <div className="grid grid-cols-[300px_280px_1fr] gap-4">
+    <div className="space-y-5">
+      <PageHeader
+        title="Optimización de Modelos"
+        subtitle="Búsqueda de hiperparámetros con Optuna · XGB / RF / CB / Deep"
+      />
+
+      <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-5">
+        {/* Left: form */}
         <Card>
-          <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Nueva busqueda</h3>
-          <div className="space-y-3">
-            <Input placeholder="model_short" value={short} onChange={(e) => setShort(e.target.value)} />
-            <Input placeholder="n_trials" type="number" value={nTrials} onChange={(e) => setNTrials(e.target.value)} />
-            <Button onClick={() => start.mutate()} disabled={!short}>Lanzar</Button>
-            {start.data && !start.data.started && (
-              <p className="text-xs text-red-400">{start.data.message ?? "No se pudo iniciar"}</p>
-            )}
-          </div>
+          <h3 className="font-display text-sm uppercase tracking-widest text-muted-foreground mb-4">
+            Nueva búsqueda
+          </h3>
+          <HpSearchForm
+            models={trainable.data ?? []}
+            busy={busy}
+            onLaunch={runQueue}
+          />
+          {launchError && (
+            <p className="mt-3 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+              {launchError}
+            </p>
+          )}
         </Card>
+
+        {/* Right: live monitor */}
         <Card>
-          <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Estado actual</h3>
-          {status.data?.is_running ? (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Model</span><span className="font-mono">{status.data.model_short}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Trials</span><span className="font-mono">{status.data.completed_trials}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--color-muted)]">Best</span><span className="font-mono">{status.data.best_value?.toFixed(4) ?? "—"}</span></div>
-              <div className="text-xs text-[var(--color-muted)]">{status.data.step ?? "—"}</div>
-            </div>
-          ) : (
-            <div className="space-y-2 text-sm">
-              <p className="text-[var(--color-muted)]">Idle.</p>
-              {status.data?.step && (
-                <div className="text-xs text-[var(--color-muted)] font-mono">{status.data.step}</div>
-              )}
-              {status.data?.best_value != null && (
-                <div className="flex justify-between"><span className="text-[var(--color-muted)]">Last best</span><span className="font-mono">{status.data.best_value.toFixed(4)}</span></div>
-              )}
+          <h3 className="font-display text-sm uppercase tracking-widest text-muted-foreground mb-4">
+            Monitor
+          </h3>
+          <HpSearchMonitor
+            status={status.data}
+            nTrials={currentNTrials || (status.data?.completed_trials ?? 0)}
+            queueIndex={queueIndex}
+            queueTotal={queueTotal}
+            live={queueActive || !!status.data?.is_running}
+          />
+          {showTraining && (
+            <div className="mt-4">
+              <TrainingMonitor
+                status={trainStatus.data}
+                onDismiss={() => setShowTraining(false)}
+              />
             </div>
           )}
         </Card>
-        <Card>
-          <h3 className="font-display text-sm uppercase tracking-widest text-[var(--color-muted)] mb-3">Studies</h3>
-          <table className="w-full text-sm">
-            <thead className="text-[10px] uppercase tracking-widest text-[var(--color-muted)] border-b border-[var(--color-border)]">
-              <tr><th className="text-left py-2">ID</th><th>Model</th><th>FS</th><th>Trials</th><th>Status</th><th>Started</th></tr>
-            </thead>
-            <tbody>
-              {(studies.data ?? []).map((s) => (
-                <tr key={s.id} className="border-b border-[var(--color-border)]/40">
-                  <td className="py-2 font-mono">{s.id}</td>
-                  <td>{s.model_short}</td>
-                  <td><Badge tone="muted">{s.feature_set}</Badge></td>
-                  <td className="font-mono">{s.n_trials}</td>
-                  <td><Badge tone={s.status === "completed" ? "accent" : s.status === "running" ? "gold" : "muted"}>{s.status}</Badge></td>
-                  <td className="text-xs text-[var(--color-muted)] font-mono">{s.started_at.slice(0, 16)}</td>
-                </tr>
-              ))}
-              {(studies.data ?? []).length === 0 && (
-                <tr><td colSpan={6} className="py-4 text-[var(--color-muted)]">Sin studies.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </Card>
       </div>
+
+      {/* Job results — expand any job to inspect its trials and adopt */}
+      <Card>
+        <h3 className="font-display text-sm uppercase tracking-widest text-muted-foreground mb-3">
+          Resultados de jobs
+        </h3>
+        <HpStudyResults
+          studies={studies.data ?? []}
+          adopting={adopting}
+          liveStudyId={status.data?.is_running ? status.data.study_id : null}
+          onAdopt={onAdopt}
+          onDelete={onDeleteStudy}
+          onDeleteMany={onDeleteManyStudies}
+        />
+      </Card>
     </div>
   );
 }

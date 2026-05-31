@@ -1,62 +1,117 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { useState } from "react";
+import { PageHeader, Button, Input, Skeleton } from "../components/ui";
+import {
+  useDashboard, useInvalidateDashboard, useRecalculationStatus,
+} from "../components/dashboard/useDashboard";
+import { DASHBOARD_MODEL_ORDER } from "../lib/model-colors";
+import StatGrid from "../components/dashboard/StatGrid";
+import ConsensusTierGrid from "../components/dashboard/ConsensusTierGrid";
+import ProbabilityTierGrid from "../components/dashboard/ProbabilityTierGrid";
+import SpecialCasesTierGrid from "../components/dashboard/SpecialCasesTierGrid";
+import SpecialCasesDialog from "../components/dashboard/SpecialCasesDialog";
+import AccuracyChart from "../components/dashboard/AccuracyChart";
+import LatestEventCard from "../components/dashboard/LatestEventCard";
+import AccuracyHeatmap from "../components/dashboard/AccuracyHeatmap";
+import ModelRanking from "../components/dashboard/ModelRanking";
+import ModelAccuracyTable from "../components/dashboard/ModelAccuracyTable";
+import EventsTable from "../components/dashboard/EventsTable";
+import EventResultsPanel from "../components/dashboard/EventResultsPanel";
 
-export default function DashboardPage() {
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
-  const registry = useQuery({ queryKey: ["registry"], queryFn: api.registry });
-  const models = useQuery({ queryKey: ["models"], queryFn: api.listModels });
+export default function Dashboard() {
+  const [minFights, setMinFights] = useState(0);
+  const { data, isLoading, isError, error, refetch } = useDashboard(minFights);
+  const invalidate = useInvalidateDashboard();
+  const recalc = useRecalculationStatus(invalidate.isPending || false);
+  const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
+  const [specialTier, setSpecialTier] = useState<string | null>(null);
+
+  // Reusable controls bar (does not depend on `data`, so it stays accessible
+  // during error states to let the user recover, e.g. lower "Min peleas").
+  const controls = (
+    <div className="flex items-center gap-3">
+      <label className="text-xs text-muted-foreground">Min peleas</label>
+      <Input type="number" value={minFights}
+             onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
+             className="w-20" />
+      <Button variant="primary" disabled={invalidate.isPending}
+              onClick={() => invalidate.mutate(minFights)}>
+        Actualizar
+      </Button>
+      {invalidate.isPending && recalc.data?.is_running && (
+        <span className="text-xs text-muted-foreground">{recalc.data.step}</span>
+      )}
+    </div>
+  );
+
+  if (isError) {
+    return (
+      <div className="space-y-5">
+        <PageHeader title="Dashboard" subtitle="Accuracy de modelos y eventos" />
+        {controls}
+        <div className="bg-card border border-destructive/40 rounded-xl p-6 space-y-3">
+          <p className="text-destructive font-semibold">No se pudo cargar el dashboard</p>
+          <p className="text-xs text-muted-foreground">
+            {error instanceof Error ? error.message : "Error desconocido al consultar /api/dashboard."}
+          </p>
+          <Button variant="primary" onClick={() => refetch()}>Reintentar</Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading || !data) {
+    return (
+      <div className="space-y-5">
+        <PageHeader title="Dashboard" subtitle="Accuracy de modelos y eventos" />
+        <div className="grid grid-cols-4 gap-4">
+          {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-28 rounded-xl" />)}
+        </div>
+        <Skeleton className="h-80 rounded-xl" />
+      </div>
+    );
+  }
+
+  const modelShorts = data.models?.length
+    ? data.models
+    : DASHBOARD_MODEL_ORDER.filter((s) => s in data.avg_by_model);
+  const pastEvents = data.accuracy_by_event.filter((e) => e.is_past);
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h2 className="font-display text-3xl tracking-wide uppercase">Dashboard</h2>
-        <p className="text-sm text-[var(--color-muted)]">Estado del Lab y modelos registrados.</p>
-      </header>
+    <div className="space-y-5">
+      <PageHeader title="Dashboard" subtitle="Accuracy de modelos y eventos" />
+      {controls}
 
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-          <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">API</div>
-          <div className="mt-2 font-mono text-2xl">
-            {health.isLoading ? "…" : health.data?.status === "ok" ? "OK" : "ERR"}
-          </div>
-        </div>
-        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-          <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">DB</div>
-          <div className="mt-2 font-mono text-2xl">
-            {health.isLoading ? "…" : health.data?.db?.startsWith("ok") ? "OK" : "ERR"}
-          </div>
-        </div>
-        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-          <div className="text-[10px] uppercase tracking-widest text-[var(--color-muted)]">Modelos</div>
-          <div className="mt-2 font-mono text-2xl">
-            {models.isLoading ? "…" : models.data?.length ?? 0}
-          </div>
-        </div>
-      </section>
+      <StatGrid data={data} />
+      <ConsensusTierGrid tiers={data.consensus_tiers} />
+      <ProbabilityTierGrid tiers={data.probability_tiers} />
+      <SpecialCasesTierGrid tiers={data.special_case_tiers} onSelect={setSpecialTier} />
 
-      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5">
-        <h3 className="font-display text-lg tracking-wide uppercase mb-3">Registro</h3>
-        {registry.isLoading ? (
-          <p className="text-[var(--color-muted)]">Cargando…</p>
-        ) : (
-          <div className="text-sm">
-            {Object.entries(registry.data?.models ?? {}).length === 0 ? (
-              <p className="text-[var(--color-muted)]">Sin modelos registrados.</p>
-            ) : (
-              <ul className="space-y-1 font-mono">
-                {Object.entries(registry.data?.models ?? {}).map(([short, info]) => (
-                  <li key={short} className="flex justify-between border-b border-[var(--color-border)] py-1">
-                    <span>{short}</span>
-                    <span className="text-[var(--color-muted)]">
-                      {info ? `v${info.version_idx} · ${info.feature_set}` : "inactive"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </section>
+      <div className="grid grid-cols-[3fr_2fr] gap-4">
+        <AccuracyChart events={pastEvents} modelShorts={modelShorts} />
+        {data.latest_event && <LatestEventCard latest={data.latest_event} />}
+      </div>
+
+      {pastEvents.length > 0 && (
+        <AccuracyHeatmap events={pastEvents} avgByModel={data.avg_by_model}
+                         modelShorts={modelShorts} />
+      )}
+
+      <div className="grid grid-cols-[2fr_3fr] gap-4">
+        <ModelRanking events={pastEvents} avgByModel={data.avg_by_model}
+                      modelShorts={modelShorts} />
+        <ModelAccuracyTable avgByModel={data.avg_by_model} modelShorts={modelShorts} />
+      </div>
+
+      <EventsTable events={data.accuracy_by_event} selectedEvent={selectedEvent}
+                   onSelectEvent={(e) => setSelectedEvent(e === selectedEvent ? null : e)} />
+      {selectedEvent && (
+        <EventResultsPanel eventName={selectedEvent} onClose={() => setSelectedEvent(null)} />
+      )}
+
+      {specialTier && (
+        <SpecialCasesDialog tier={specialTier} fights={data.special_case_fights}
+                            onClose={() => setSpecialTier(null)} />
+      )}
     </div>
   );
 }

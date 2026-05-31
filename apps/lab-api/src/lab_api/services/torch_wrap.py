@@ -141,9 +141,10 @@ def make_deep_mlp(
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
     hidden_dims: tuple[int, ...] = (128, 64, 32),
+    dropout: float = 0.3,
 ) -> _BinaryNNWrapper:
     return _BinaryNNWrapper(
-        factory=_DeepMLPFactory(list(hidden_dims), dropout=0.3),
+        factory=_DeepMLPFactory(list(hidden_dims), dropout=dropout),
         epochs=epochs,
         batch_size=batch_size,
         lr=lr,

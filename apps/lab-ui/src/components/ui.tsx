@@ -11,7 +11,7 @@ export function PageHeader({ title, subtitle }: { title: string; subtitle?: stri
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return (
-    <div className={`rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] p-5 ${className}`}>
+    <div className={`rounded-lg border border-border bg-card p-5 ${className}`}>
       {children}
     </div>
   );
@@ -25,7 +25,7 @@ export function Button({
 }) {
   const styles =
     variant === "primary"
-      ? "bg-[var(--color-accent)] text-[var(--color-accent-foreground)] hover:bg-[var(--color-accent)]/85"
+      ? "bg-accent text-accent-foreground font-semibold shadow-[var(--shadow-primary-btn)] hover:bg-accent-hi hover:shadow-[var(--shadow-primary-btn-hi)]"
       : variant === "danger"
       ? "bg-red-700 text-white hover:bg-red-600"
       : "bg-white/5 text-[var(--color-foreground)] hover:bg-white/10";
@@ -47,6 +47,10 @@ export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
       className={`w-full bg-[var(--color-background)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] focus:outline-none ${props.className ?? ""}`}
     />
   );
+}
+
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`animate-pulse bg-white/5 rounded-md ${className}`} />;
 }
 
 export function Badge({ children, tone = "default" }: { children: ReactNode; tone?: "default" | "accent" | "gold" | "muted" }) {
