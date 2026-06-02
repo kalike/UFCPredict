@@ -45,8 +45,9 @@ def test_realworld_df_feeds_tapology_picks_when_present():
         captured.update(kwargs)
         return {"delta_dummy": 0.0}
 
-    with patch("ufc_core.tapology.picks_repo.load_db_picks_lookup", return_value=lookup), \
-         patch("ufc_core.features.engine.compute_fight_features", side_effect=_spy):
+    # Patch where the names are looked up (training imports them at module level).
+    with patch("lab_api.services.training.load_db_picks_lookup", return_value=lookup), \
+         patch("lab_api.services.training.compute_fight_features", side_effect=_spy):
         df = training_svc._build_realworld_df(ds, {}, {})
 
     assert len(df) == 1
@@ -69,8 +70,8 @@ def test_realworld_df_neutral_when_no_picks():
         captured.update(kwargs)
         return {"delta_dummy": 0.0}
 
-    with patch("ufc_core.tapology.picks_repo.load_db_picks_lookup", return_value={}), \
-         patch("ufc_core.features.engine.compute_fight_features", side_effect=_spy):
+    with patch("lab_api.services.training.load_db_picks_lookup", return_value={}), \
+         patch("lab_api.services.training.compute_fight_features", side_effect=_spy):
         training_svc._build_realworld_df(ds, {}, {})
 
     assert captured.get("tapology_picks") is None

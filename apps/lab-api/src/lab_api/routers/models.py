@@ -37,6 +37,7 @@ class VersionSummary(BaseModel):
     artifact_uri: str
     metrics_json: dict | None
     hp_json: dict | None
+    trained_at: str | None = None
     starred: bool
     was_production: bool
     note: str | None

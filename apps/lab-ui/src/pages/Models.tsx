@@ -1,9 +1,13 @@
 import { Fragment, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Pencil, Star, Trash2, X } from "lucide-react";
-import { api } from "../api/client";
+import {
+  ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronDown, ChevronRight,
+  Pencil, Star, Trash2, X,
+} from "lucide-react";
+import { api, asModelMetrics } from "../api/client";
 import type { ModelInfo, VersionInfo } from "../api/client";
 import { PageHeader } from "../components/ui";
+import { VersionDetailPanel } from "../components/models/VersionDetailPanel";
 
 const MODEL_COLORS: Record<string, string> = {
   RF35: "#ef4444",
@@ -50,6 +54,40 @@ function fsBadgeClass(fs: string | null): string {
     case "v2": return "bg-accent/15 text-accent";
     default:   return "bg-border/50 text-muted-foreground";
   }
+}
+
+function ftBadgeClass(ft: string | undefined): string {
+  return ft === "52f" ? "bg-blue-500/15 text-blue-400" : "bg-border/50 text-muted-foreground";
+}
+
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toISOString().slice(0, 10);
+}
+
+// Read a hp_json field (the lab persists dataset/feat_type/min_fights/use_pit/
+// augment/origin/test_cutoff there).
+function hpVal<T = unknown>(v: VersionInfo, key: string): T | undefined {
+  return v.hp_json?.[key] as T | undefined;
+}
+
+function rwAccOf(v: VersionInfo): number | null {
+  return metricNum(v.metrics_json, "realworld_accuracy");
+}
+
+function YesNo({ on }: { on: boolean }) {
+  return on
+    ? <span className="text-success text-[10px] font-medium">Sí</span>
+    : <span className="text-muted-foreground text-[10px]">No</span>;
+}
+
+function OriginBadge({ origin }: { origin: string | undefined }) {
+  if (origin === "original_pro")
+    return <span className="px-1 py-0.5 rounded text-[9px] font-bold bg-sky-500/20 text-sky-400 leading-none" title="Modelo PRO original">PRO</span>;
+  if (origin === "hp_search")
+    return <span className="px-1 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-400 leading-none" title="Hiperparámetros optimizados con Optuna">HP</span>;
+  return null;
 }
 
 function ModelCard({
@@ -144,6 +182,19 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
   const accentColor = modelColor(short);
   const [editingNoteIdx, setEditingNoteIdx] = useState<number | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const toggleRow = (idx: number) =>
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      next.has(idx) ? next.delete(idx) : next.add(idx);
+      return next;
+    });
+  const [sortKey, setSortKey] = useState<"accuracy" | "realworld" | null>(null);
+  const [sortDir, setSortDir] = useState<"desc" | "asc">("desc");
+  const toggleSort = (key: "accuracy" | "realworld") => {
+    if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSortKey(key); setSortDir("desc"); }
+  };
 
   const versions = useQuery({
     queryKey: ["versions", short],
@@ -193,6 +244,25 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
   const metricsSource: VersionInfo | null =
     activeVersion ?? (list.length > 0 ? list[list.length - 1] : null);
   const metrics = metricsSource?.metrics_json ?? null;
+
+  const orderedList = (() => {
+    if (!sortKey) return list;
+    const get = sortKey === "accuracy"
+      ? (v: VersionInfo) => metricNum(v.metrics_json, "accuracy")
+      : rwAccOf;
+    const dir = sortDir === "desc" ? -1 : 1;
+    return [...list].sort((a, b) => {
+      const va = get(a), vb = get(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;   // nulls last regardless of direction
+      if (vb == null) return -1;
+      return (va - vb) * dir;
+    });
+  })();
+  const SortIcon = ({ k }: { k: "accuracy" | "realworld" }) =>
+    sortKey === k
+      ? (sortDir === "desc" ? <ArrowDown size={11} /> : <ArrowUp size={11} />)
+      : <ArrowUpDown size={11} className="opacity-40" />;
 
   const saveNote = (idx: number) => {
     mark.mutate({ idx, patch: { note: noteDraft } });
@@ -246,61 +316,33 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
 
         {!versions.isLoading && (
           <>
-            {/* Metrics */}
-            <div className="grid grid-cols-2 gap-6">
-              <div>
-                <h3 className="text-xs text-muted-foreground uppercase tracking-wider mb-3">
-                  Métricas de Evaluación
-                  {metricsSource && (
-                    <span className="ml-2 normal-case tracking-normal">
-                      (v{metricsSource.version_idx}{metricsSource === activeVersion ? " · activa" : ""})
-                    </span>
-                  )}
-                </h3>
-                {metrics ? (
-                  <div>
-                    <MetricRow label="Accuracy" value={fmtPct(metricNum(metrics, "accuracy"))} />
-                    <MetricRow
-                      label="Log Loss"
-                      value={metricNum(metrics, "log_loss")?.toFixed(4) ?? "—"}
-                    />
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      n_train: {metricNum(metrics, "n_train") ?? "—"} &middot;{" "}
-                      n_test: {metricNum(metrics, "n_test") ?? "—"} &middot;{" "}
-                      features: {metricNum(metrics, "n_features") ?? "—"}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground">Sin métricas disponibles</p>
-                )}
-              </div>
+            {/* Info row */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <MetricRow label="Familia" value={model.family} />
+              <MetricRow label="Feat type" value={model.default_feat_type} />
+              <MetricRow label="Versiones" value={String(list.length)} />
+              <MetricRow
+                label="Activa"
+                value={model.active_version != null ? `v${model.active_version}` : "ninguna"}
+              />
+            </div>
 
-              <div>
+            {/* Display-version detail (active, or latest if none active) */}
+            {metricsSource && asModelMetrics(metrics) ? (
+              <div className="rounded-lg border border-border/60 bg-background/30 p-4">
                 <h3 className="text-xs text-muted-foreground uppercase tracking-wider mb-3">
-                  Información
+                  Detalle · v{metricsSource.version_idx}
+                  {metricsSource === activeVersion ? " (activa)" : " (última)"}
                 </h3>
-                <MetricRow label="Familia" value={model.family} />
-                <MetricRow label="Feat type" value={model.default_feat_type} />
-                <MetricRow
-                  label="Versiones"
-                  value={String(list.length)}
+                <VersionDetailPanel
+                  metrics={asModelMetrics(metrics)!}
+                  params={metricsSource.hp_json}
+                  origin={(metricsSource.hp_json?.origin as string | undefined) ?? undefined}
                 />
               </div>
-            </div>
-
-            {/* Active version banner */}
-            <div className="bg-accent/10 border border-accent/20 rounded-lg px-4 py-3 flex items-center justify-between">
-              <span className="text-sm text-foreground font-medium">Versión activa</span>
-              <span
-                className={[
-                  "text-xl font-bold",
-                  model.active_version != null ? "text-accent" : "text-muted-foreground",
-                ].join(" ")}
-                style={{ fontFamily: "'Oswald', sans-serif" }}
-              >
-                {model.active_version != null ? `v${model.active_version}` : "ninguna"}
-              </span>
-            </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">Sin métricas disponibles</p>
+            )}
 
             {/* Versions table */}
             <div>
@@ -332,6 +374,7 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b border-border text-muted-foreground">
+                        <th className="pb-2 pr-1 w-6" />
                         <th className="pb-2 pr-2 w-8 text-center font-medium">
                           <input
                             type="checkbox"
@@ -346,22 +389,52 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                           <Star size={11} className="inline text-muted-foreground" />
                         </th>
                         <th className="text-left pb-2 pr-3 font-medium">#</th>
-                        <th className="text-left pb-2 pr-3 font-medium">FS</th>
-                        <th className="text-left pb-2 pr-3 font-medium">Artifact</th>
-                        <th className="text-right pb-2 pr-3 font-medium">Test Acc</th>
-                        <th className="text-right pb-2 pr-3 font-medium">Log Loss</th>
+                        <th className="text-left pb-2 pr-3 font-medium">Fecha</th>
+                        <th className="text-left pb-2 pr-3 font-medium">Dataset</th>
+                        <th className="text-left pb-2 pr-3 font-medium">Features</th>
+                        <th className="text-left pb-2 pr-3 font-medium">Tipo</th>
+                        <th className="text-center pb-2 pr-3 font-medium">PIT</th>
+                        <th className="text-right pb-2 pr-3 font-medium">Min Fights</th>
+                        <th className="text-center pb-2 pr-3 font-medium">Augment</th>
+                        <th className="text-right pb-2 pr-3 font-medium">Cutoff</th>
+                        <th className="text-right pb-2 pr-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort("accuracy")}
+                            className={["inline-flex items-center gap-1 transition-colors", sortKey === "accuracy" ? "text-foreground" : "hover:text-foreground"].join(" ")}
+                            title="Ordenar por Test Acc"
+                          >
+                            Test Acc <SortIcon k="accuracy" />
+                          </button>
+                        </th>
+                        <th className="text-right pb-2 pr-3 font-medium">
+                          <button
+                            type="button"
+                            onClick={() => toggleSort("realworld")}
+                            className={["inline-flex items-center gap-1 transition-colors", sortKey === "realworld" ? "text-foreground" : "hover:text-foreground"].join(" ")}
+                            title="Ordenar por Real World"
+                          >
+                            Real World <SortIcon k="realworld" />
+                          </button>
+                        </th>
+                        <th className="text-right pb-2 pr-3 font-medium">Overfit</th>
                         <th className="text-center pb-2 pr-3 font-medium">Activa</th>
                         <th className="text-right pb-2 font-medium">Acciones</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {list.map((v) => {
+                      {orderedList.map((v) => {
                         const isActive = v.version_idx === model.active_version;
                         const starred = v.starred === true;
                         const note = v.note ?? null;
                         const isEditingNote = editingNoteIdx === v.version_idx;
                         const acc = metricNum(v.metrics_json, "accuracy");
-                        const ll = metricNum(v.metrics_json, "log_loss");
+                        const rwAcc = rwAccOf(v);
+                        const rwCorrect = metricNum(v.metrics_json, "realworld_correct");
+                        const rwTotal = metricNum(v.metrics_json, "realworld_total");
+                        const overfit = metricNum(v.metrics_json, "overfit_gap");
+                        const origin = hpVal<string>(v, "origin");
+                        const featType = hpVal<string>(v, "feat_type") ?? model.default_feat_type;
 
                         return (
                           <Fragment key={v.version_idx}>
@@ -372,6 +445,17 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                                 starred ? "bg-yellow-500/5 border-yellow-500/30" : "border-border/40",
                               ].join(" ")}
                             >
+                              <td className="py-2 pr-1 text-center">
+                                <button
+                                  onClick={() => toggleRow(v.version_idx)}
+                                  className="text-muted-foreground hover:text-foreground transition-colors"
+                                  title="Ver detalle de la versión"
+                                >
+                                  {expandedRows.has(v.version_idx)
+                                    ? <ChevronDown size={13} />
+                                    : <ChevronRight size={13} />}
+                                </button>
+                              </td>
                               <td className="py-2 pr-2 text-center">
                                 <input
                                   type="checkbox"
@@ -397,20 +481,50 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                                   <Star size={14} fill={starred ? "currentColor" : "none"} />
                                 </button>
                               </td>
-                              <td className="py-2 pr-3 text-muted-foreground">{v.version_idx}</td>
+                              <td className="py-2 pr-3 text-muted-foreground">
+                                <span className="flex items-center gap-1">
+                                  {v.version_idx}
+                                  <OriginBadge origin={origin} />
+                                </span>
+                              </td>
+                              <td className="py-2 pr-3 text-foreground whitespace-nowrap">{fmtDate(v.trained_at)}</td>
+                              <td className="py-2 pr-3 text-muted-foreground">{hpVal<string>(v, "dataset") ?? "—"}</td>
                               <td className="py-2 pr-3">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium uppercase ${fsBadgeClass(v.feature_set)}`}>
                                   {v.feature_set ?? "legacy"}
                                 </span>
                               </td>
-                              <td className="py-2 pr-3 text-muted-foreground font-mono text-[11px]">
-                                {v.artifact_uri}
+                              <td className="py-2 pr-3">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ftBadgeClass(featType)}`}>
+                                  {featType}
+                                </span>
                               </td>
+                              <td className="py-2 pr-3 text-center"><YesNo on={hpVal<boolean>(v, "use_pit") === true} /></td>
+                              <td className="py-2 pr-3 text-right text-muted-foreground">{hpVal<number>(v, "min_fights") ?? 0}</td>
+                              <td className="py-2 pr-3 text-center"><YesNo on={hpVal<boolean>(v, "augment") === true} /></td>
+                              <td className="py-2 pr-3 text-right text-muted-foreground">{hpVal<number | string>(v, "test_cutoff") ?? 2024}</td>
                               <td className="py-2 pr-3 text-right text-foreground font-medium">
                                 <span style={{ fontFamily: "'Oswald', sans-serif" }}>{fmtPct(acc)}</span>
                               </td>
-                              <td className="py-2 pr-3 text-right text-muted-foreground">
-                                {ll != null ? ll.toFixed(4) : "—"}
+                              <td className="py-2 pr-3 text-right">
+                                {rwAcc != null ? (
+                                  <span className="flex items-center justify-end gap-1">
+                                    <span
+                                      className={rwAcc > 0.65 ? "text-accent font-medium" : "text-muted-foreground"}
+                                      style={{ fontFamily: "'Oswald', sans-serif" }}
+                                    >
+                                      {fmtPct(rwAcc)}
+                                    </span>
+                                    {rwCorrect != null && rwTotal != null && (
+                                      <span className="text-[10px] text-muted-foreground">({rwCorrect}/{rwTotal})</span>
+                                    )}
+                                  </span>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </td>
+                              <td className={["py-2 pr-3 text-right font-medium", overfit != null && overfit > 0.05 ? "text-warning" : "text-muted-foreground"].join(" ")}>
+                                {overfit != null ? `${overfit >= 0 ? "+" : ""}${(overfit * 100).toFixed(1)}%` : "—"}
                               </td>
                               <td className="py-2 pr-3 text-center">
                                 {isActive ? (
@@ -463,9 +577,24 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                                 </div>
                               </td>
                             </tr>
+                            {expandedRows.has(v.version_idx) && (
+                              <tr className={starred ? "bg-yellow-500/5" : ""}>
+                                <td colSpan={17} className="py-3 px-3 bg-background/40">
+                                  {asModelMetrics(v.metrics_json) ? (
+                                    <VersionDetailPanel
+                                      metrics={asModelMetrics(v.metrics_json)!}
+                                      params={v.hp_json}
+                                      origin={(v.hp_json?.origin as string | undefined) ?? undefined}
+                                    />
+                                  ) : (
+                                    <p className="text-xs text-muted-foreground">Sin métricas para esta versión</p>
+                                  )}
+                                </td>
+                              </tr>
+                            )}
                             {isEditingNote && (
                               <tr className={starred ? "bg-yellow-500/5" : ""}>
-                                <td colSpan={9} className="py-2 px-3">
+                                <td colSpan={17} className="py-2 px-3">
                                   <div className="flex items-center gap-2">
                                     <input
                                       type="text"
@@ -504,7 +633,7 @@ function ModelDetail({ model, onClose }: { model: ModelInfo; onClose: () => void
                             )}
                             {!isEditingNote && note && (
                               <tr className={starred ? "bg-yellow-500/5" : ""}>
-                                <td colSpan={9} className="py-1 px-3 text-[11px] text-muted-foreground italic">
+                                <td colSpan={17} className="py-1 px-3 text-[11px] text-muted-foreground italic">
                                   {note}
                                 </td>
                               </tr>

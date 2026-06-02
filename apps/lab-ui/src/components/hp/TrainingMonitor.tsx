@@ -47,11 +47,18 @@ export function TrainingMonitor({ status, onDismiss }: TrainingMonitorProps) {
             <div key={i} className={r.error ? "text-destructive" : "text-success"}>
               {r.model_short}: {r.error
                 ? "Error"
-                : `Acc ${((r.accuracy ?? 0) * 100).toFixed(1)}% · ` +
-                  `RW ${r.realworld_accuracy != null ? (r.realworld_accuracy * 100).toFixed(1) + "%" : "—"}` +
+                : `Prod Acc ${((r.accuracy ?? 0) * 100).toFixed(1)}% · ` +
+                  `RW (min_fights) ${r.realworld_accuracy != null ? (r.realworld_accuracy * 100).toFixed(1) + "%" : "—"}` +
+                  (r.realworld_total ? ` (${r.realworld_correct}/${r.realworld_total})` : "") +
                   (r.version_idx != null ? ` · v${r.version_idx}` : "")}
             </div>
           ))}
+          {status.results.some((r) => !r.error) && (
+            <p className="text-[10px] text-muted-foreground pt-0.5 leading-snug">
+              Prod Acc = accuracy en el split test-val (≡ columna <strong>Prod Acc</strong> del trial, no la media CV) ·
+              RW (min_fights) = realworld con el min_fights del job (≡ columna <strong>RW (min_fights)</strong> del trial).
+            </p>
+          )}
         </div>
       )}
     </div>

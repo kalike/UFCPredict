@@ -163,6 +163,21 @@ def _parse_event_cell(cell) -> tuple[str, str | None]:
     return event_name, iso_date
 
 
+def _opponent_url_from_cell(cell, owner_url: str) -> str | None:
+    """Return the opponent's UFCStats fighter-details URL from the 'Fighter' cell.
+
+    The cell links both fighters of the bout; the opponent is the fighter-details
+    anchor whose href is not the page owner's. Returns None if absent (e.g. the
+    opponent has no UFCStats page). This is the canonical identity we resolve on
+    at ingest time, instead of the (sometimes truncated) display name.
+    """
+    for a in cell.find_all("a"):
+        href = (a.get("href") or "").strip()
+        if "fighter-details/" in href and href != owner_url:
+            return href
+    return None
+
+
 def parse_fighter_page(fighter_url: str) -> dict:
     soup = get_soup(fighter_url)
     name_el = soup.find("span", class_="b-content__title-highlight")
@@ -200,6 +215,7 @@ def parse_fighter_page(fighter_url: str) -> dict:
         fight_data = {
             "result": cols[0].text.strip(),
             "opponent": cols[1].text.strip(),
+            "opponent_url": _opponent_url_from_cell(cols[1], fighter_url),
             "event": event_name,
             "event_date": event_date,
             "method": cols[7].text.strip(),

@@ -23,6 +23,12 @@ const METRIC_COLS: { key: keyof NonNullable<HpTrial["metrics"]>; label: string; 
   { key: "tossup_acc_col" as never, label: "Toss-up", pct: true },
   { key: "upset_pr_col" as never, label: "Upset P/R", pct: false },
   { key: "brier_delta_col" as never, label: "ΔBrier", pct: false },
+  { key: "roi_all_col" as never, label: "ROI EV+", pct: false },
+  { key: "roi_sel_col" as never, label: "EV+ sel", pct: false },
+  { key: "roi_val_col" as never, label: "EV+ val", pct: false },
+  { key: "roi_dog_all_col" as never, label: "ROI dog", pct: false },
+  { key: "roi_dog_sel_col" as never, label: "dog sel", pct: false },
+  { key: "roi_dog_val_col" as never, label: "dog val", pct: false },
 ];
 
 function fmt(v: number | null | undefined, pct: boolean): string {
@@ -51,8 +57,18 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
 
   const sortAsc = MINIMIZE.has(sortKey);
   const sorted = [...trials].sort((a, b) => {
-    const va = (a.metrics?.[sortKey as keyof NonNullable<HpTrial["metrics"]>] as number) ?? (sortAsc ? Infinity : -Infinity);
-    const vb = (b.metrics?.[sortKey as keyof NonNullable<HpTrial["metrics"]>] as number) ?? (sortAsc ? Infinity : -Infinity);
+    const accessor = (t: HpTrial): number => {
+      const rv = t.metrics?.realworld_value;
+      if (sortKey === "roi_all_col") return rv?.roi_ev ?? (sortAsc ? Infinity : -Infinity);
+      if (sortKey === "roi_sel_col") return rv?.roi_ev_sel ?? (sortAsc ? Infinity : -Infinity);
+      if (sortKey === "roi_val_col") return rv?.roi_ev_val ?? (sortAsc ? Infinity : -Infinity);
+      if (sortKey === "roi_dog_all_col") return rv?.roi_dog ?? (sortAsc ? Infinity : -Infinity);
+      if (sortKey === "roi_dog_sel_col") return rv?.roi_dog_sel ?? (sortAsc ? Infinity : -Infinity);
+      if (sortKey === "roi_dog_val_col") return rv?.roi_dog_val ?? (sortAsc ? Infinity : -Infinity);
+      return (t.metrics?.[sortKey as keyof NonNullable<HpTrial["metrics"]>] as number) ?? (sortAsc ? Infinity : -Infinity);
+    };
+    const va = accessor(a);
+    const vb = accessor(b);
     return sortAsc ? va - vb : vb - va;
   });
   const colSpan = (selectable ? 1 : 0) + 2 + METRIC_COLS.length;
@@ -147,6 +163,104 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                           ].join(" ")}
                         >
                           {rv ? `${rv.brier_delta >= 0 ? "+" : ""}${rv.brier_delta.toFixed(4)}` : "—"}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_all_col" as never)) {
+                      const r = rv?.roi_ev;
+                      const np = rv?.n_picks_ev ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_sel_col" as never)) {
+                      const r = rv?.roi_ev_sel;
+                      const np = rv?.n_picks_sel ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_val_col" as never)) {
+                      const r = rv?.roi_ev_val;
+                      const np = rv?.n_picks_val ?? 0;
+                      const small = np > 0 && np < 40;
+                      const title = [
+                        `n=${np}`,
+                        rv?.split_date ? `corte ${rv.split_date}` : null,
+                        small ? "muestra pequeña" : null,
+                      ].filter(Boolean).join(" · ");
+                      return (
+                        <td
+                          key={c.key}
+                          title={title}
+                          className={[
+                            "py-1.5 px-2 text-right whitespace-nowrap display-num font-medium",
+                            r != null ? (r > 0 ? "text-success" : r < 0 ? "text-destructive" : "") : "",
+                          ].join(" ")}
+                        >
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_dog_all_col" as never)) {
+                      const r = rv?.roi_dog;
+                      const np = rv?.n_picks_dog ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_dog_sel_col" as never)) {
+                      const r = rv?.roi_dog_sel;
+                      const np = rv?.n_picks_dog_sel ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === ("roi_dog_val_col" as never)) {
+                      const r = rv?.roi_dog_val;
+                      const np = rv?.n_picks_dog_val ?? 0;
+                      const small = np > 0 && np < 40;
+                      const title = [
+                        `n=${np}`,
+                        rv?.split_date ? `corte ${rv.split_date}` : null,
+                        small ? "muestra pequeña" : null,
+                      ].filter(Boolean).join(" · ");
+                      return (
+                        <td
+                          key={c.key}
+                          title={title}
+                          className={[
+                            "py-1.5 px-2 text-right whitespace-nowrap display-num font-medium",
+                            r != null ? (r > 0 ? "text-success" : r < 0 ? "text-destructive" : "") : "",
+                          ].join(" ")}
+                        >
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
                         </td>
                       );
                     }

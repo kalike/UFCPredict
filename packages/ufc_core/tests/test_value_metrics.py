@@ -118,3 +118,77 @@ def test_evaluate_realworld_attaches_value_when_odds_present():
         is_pytorch=False, min_fights=0,
     )
     assert "realworld_value" not in out2
+
+
+def test_roi_ev_total_and_split():
+    # Fight A: f1 +200 (imp .3333, dec 3.0), f2 -250 (imp .7143). p=0.6 ->
+    #   edge_f1 = .6-.3333 = +.2667 -> bet f1; f1 wins (y=1) -> ret = 3.0-1 = +2.0
+    # Fight B: f1 -250 (imp .7143, dec 1.4), f2 +200 (imp .3333). p=0.8 ->
+    #   edge_f1 = .8-.7143 = +.0857 -> bet f1; f1 loses (y=0) -> ret = -1.0
+    # ROI total = (2.0 + -1.0)/2 = 0.5 over 2 picks.
+    # Split by median date: A older -> sel, B newer -> val.
+    out = compute_value_metrics(
+        proba_f1=np.array([0.6, 0.8]),
+        y=np.array([1.0, 0.0]),
+        odds_f1_american=np.array([200.0, -250.0]),
+        odds_f2_american=np.array([-250.0, 200.0]),
+        event_dates=np.array(["2025-06-01", "2025-12-01"], dtype="datetime64[D]"),
+    )
+    assert out is not None
+    assert out["n_picks_ev"] == 2
+    assert out["roi_ev"] == 0.5
+    assert out["n_picks_sel"] == 1
+    assert out["n_picks_val"] == 1
+    assert out["roi_ev_sel"] == 2.0
+    assert out["roi_ev_val"] == -1.0
+    assert out["split_date"] is not None
+
+
+def test_roi_no_pick_when_no_positive_edge():
+    # f1 -150 (imp .6), f2 +100 (imp .5). p=0.55 -> edge_f1=-.05, edge_f2=-.05.
+    # No EV+ side -> no pick at all.
+    out = compute_value_metrics(
+        proba_f1=np.array([0.55]),
+        y=np.array([1.0]),
+        odds_f1_american=np.array([-150.0]),
+        odds_f2_american=np.array([100.0]),
+        event_dates=np.array(["2025-07-01"], dtype="datetime64[D]"),
+    )
+    assert out is not None
+    assert out["n_picks_ev"] == 0
+    assert out["roi_ev"] is None
+
+
+def test_no_event_dates_is_backward_compatible():
+    out = compute_value_metrics(
+        proba_f1=np.array([0.6, 0.4]),
+        y=np.array([1.0, 0.0]),
+        odds_f1_american=np.array([-110.0, -110.0]),
+        odds_f2_american=np.array([-110.0, -110.0]),
+    )
+    assert out is not None
+    assert "roi_ev" not in out
+    assert "roi_ev_sel" not in out
+    assert "split_date" not in out
+
+
+def test_roi_dog_picks_and_split():
+    # Fight A: f1 +200 (underdog, dec 3.0). p=0.6 -> model picks f1 (the dog).
+    #   f1 wins (y=1) -> dog-pick hit -> ret_dog = 3.0-1 = +2.0
+    # Fight B: f1 -250 (favourite), f2 +200 (underdog). p=0.8 -> model picks f1
+    #   (the favourite), so it does NOT back the dog -> no dog-pick.
+    # ROI dog = +2.0 over 1 pick. Split: A older -> sel, B newer -> val.
+    out = compute_value_metrics(
+        proba_f1=np.array([0.6, 0.8]),
+        y=np.array([1.0, 0.0]),
+        odds_f1_american=np.array([200.0, -250.0]),
+        odds_f2_american=np.array([-250.0, 200.0]),
+        event_dates=np.array(["2025-06-01", "2025-12-01"], dtype="datetime64[D]"),
+    )
+    assert out is not None
+    assert out["n_picks_dog"] == 1
+    assert out["roi_dog"] == 2.0
+    assert out["n_picks_dog_sel"] == 1
+    assert out["roi_dog_sel"] == 2.0
+    assert out["n_picks_dog_val"] == 0
+    assert out["roi_dog_val"] is None

@@ -1143,6 +1143,10 @@ def evaluate_realworld(
             proba_rw, y_rw,
             pd.to_numeric(rw["odds_f1_american"], errors="coerce").to_numpy(dtype=float),
             pd.to_numeric(rw["odds_f2_american"], errors="coerce").to_numpy(dtype=float),
+            event_dates=(
+                pd.to_datetime(rw["event_date"]).to_numpy()
+                if "event_date" in rw.columns else None
+            ),
         )
         if rv is not None:
             result["realworld_value"] = rv

@@ -44,6 +44,13 @@ export type RealworldValue = {
   upset_total: number; upset_detected: number; upset_recall: number | null;
   brier_model: number; brier_market: number; brier_delta: number;
   logloss_model: number; logloss_market: number; logloss_delta: number;
+  roi_ev?: number | null; n_picks_ev?: number;
+  roi_ev_sel?: number | null; n_picks_sel?: number;
+  roi_ev_val?: number | null; n_picks_val?: number;
+  roi_dog?: number | null; n_picks_dog?: number;
+  roi_dog_sel?: number | null; n_picks_dog_sel?: number;
+  roi_dog_val?: number | null; n_picks_dog_val?: number;
+  split_date?: string | null;
   buckets: RealworldValueBucket[];
 };
 // Shape of model_version.metrics_json. All optional: older versions may lack

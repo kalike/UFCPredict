@@ -158,6 +158,21 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
             if fields["dob"]:
                 existing.dob = fields["dob"]
             existing.last_scraped_at = datetime.now(UTC)
+            # Reconcile name from the fighter's own page (the canonical source):
+            # a stub created earlier with a truncated opponent name gets fixed
+            # here. Guard the unique slug against collisions.
+            payload_name = (item.get("name") or "").strip()
+            if payload_name and payload_name != existing.name:
+                existing.name = payload_name
+                new_slug = _slug(payload_name)
+                slug_taken = (
+                    db.query(models.Fighter.id)
+                      .filter(models.Fighter.slug == new_slug,
+                              models.Fighter.id != existing.id)
+                      .first()
+                )
+                if not slug_taken:
+                    existing.slug = new_slug
             fighter = existing
             fighters_updated += 1
 
@@ -189,14 +204,28 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
             if not opp_name:
                 continue
 
-            # Look up opponent by name first (covers both real fighters and placeholders).
-            opp = fighter_by_name.get(opp_name)
+            # Resolve the opponent by canonical URL first (covers truncated
+            # display names that UFCStats uses in other fighters' histories),
+            # then by exact name, and only then create a stub. The stub is keyed
+            # by the REAL url when known, so scraping the opponent's own page
+            # later updates it (reconciliation) instead of duplicating.
+            opp_url = fight.get("opponent_url")
+            opp = fighter_by_url.get(opp_url) if opp_url else None
             if opp is None:
-                # Placeholder fighter to satisfy the FK; filled in when their page is scraped.
+                # Residual fallback: opponent_url absent or not scraped yet.
+                # When opponent_url is missing but the opponent has a real UFCStats
+                # page, this path can still create a placeholder:// stub on the next
+                # scrape, regenerating a duplicate fight — re-run dedup-truncated-fighters
+                # after any scrape that adds new fighters.
+                opp = fighter_by_name.get(opp_name)
+            if opp is None:
+                stub_url = opp_url or f"placeholder://{opp_name}"
+                opp = fighter_by_url.get(stub_url)
+            if opp is None:
                 opp = models.Fighter(
                     name=opp_name,
                     slug=_slug(opp_name),
-                    ufcstats_url=f"placeholder://{opp_name}",
+                    ufcstats_url=stub_url,
                 )
                 db.add(opp)
                 db.flush()

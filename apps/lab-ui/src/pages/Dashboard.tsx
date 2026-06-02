@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { PageHeader, Button, Input, Skeleton } from "../components/ui";
 import {
   useDashboard, useInvalidateDashboard, useRecalculationStatus,
@@ -18,12 +19,36 @@ import EventsTable from "../components/dashboard/EventsTable";
 import EventResultsPanel from "../components/dashboard/EventResultsPanel";
 
 export default function Dashboard() {
+  const qc = useQueryClient();
   const [minFights, setMinFights] = useState(0);
   const { data, isLoading, isError, error, refetch } = useDashboard(minFights);
   const invalidate = useInvalidateDashboard();
-  const recalc = useRecalculationStatus(invalidate.isPending || false);
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [specialTier, setSpecialTier] = useState<string | null>(null);
+
+  // The recalc runs in the background (~minutes) while the POST returns at once.
+  // Track its lifecycle so the progress stays visible the whole time and the
+  // dashboard refreshes only once it actually finishes.
+  const [recalcPhase, setRecalcPhase] = useState<"idle" | "starting" | "running">("idle");
+  const recalcActive = recalcPhase !== "idle";
+  const recalc = useRecalculationStatus(recalcActive);
+
+  useEffect(() => {
+    if (!recalcActive) return;
+    const st = recalc.data;
+    if (!st) return;
+    if (recalcPhase === "starting" && st.is_running) {
+      setRecalcPhase("running");
+    } else if (recalcPhase === "running" && !st.is_running) {
+      // Recalc finished: now (and only now) refresh the dashboard data.
+      setRecalcPhase("idle");
+      qc.invalidateQueries({ queryKey: ["dashboard", "summary"] });
+    }
+  }, [recalc.data, recalcPhase, recalcActive, qc]);
+
+  const startRecalc = () => {
+    invalidate.mutate(minFights, { onSuccess: () => setRecalcPhase("starting") });
+  };
 
   // Reusable controls bar (does not depend on `data`, so it stays accessible
   // during error states to let the user recover, e.g. lower "Min peleas").
@@ -33,12 +58,16 @@ export default function Dashboard() {
       <Input type="number" value={minFights}
              onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
              className="w-20" />
-      <Button variant="primary" disabled={invalidate.isPending}
-              onClick={() => invalidate.mutate(minFights)}>
-        Actualizar
+      <Button variant="primary" disabled={recalcActive || invalidate.isPending}
+              onClick={startRecalc}>
+        {recalcActive ? "Recalculando…" : "Actualizar"}
       </Button>
-      {invalidate.isPending && recalc.data?.is_running && (
-        <span className="text-xs text-muted-foreground">{recalc.data.step}</span>
+      {recalcActive && (
+        <span className="text-xs text-muted-foreground">
+          {recalc.data?.is_running
+            ? `${recalc.data.step ?? "recalculando"} · ${recalc.data.completed_events}/${recalc.data.total_events}`
+            : "iniciando…"}
+        </span>
       )}
     </div>
   );
