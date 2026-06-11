@@ -35,6 +35,10 @@ class MatchupPicksDto:
     fighter_a_methods: dict[str, float] | None
     fighter_b_methods: dict[str, float] | None
     matchup_url: str
+    # American odds for fighter_a / fighter_b as scraped from the matchup page
+    # (None when Tapology shows no line). Persisted onto the Fight row.
+    odds_a_american: int | None = None
+    odds_b_american: int | None = None
 
 
 def parse_matchup_to_picks_dto(html: str, matchup_url: str) -> MatchupPicksDto:
@@ -58,6 +62,8 @@ def parse_matchup_to_picks_dto(html: str, matchup_url: str) -> MatchupPicksDto:
             fighter_a_methods=None,
             fighter_b_methods=None,
             matchup_url=matchup_url,
+            odds_a_american=fight.odds_f1_american,
+            odds_b_american=fight.odds_f2_american,
         )
 
     return MatchupPicksDto(
@@ -77,6 +83,8 @@ def parse_matchup_to_picks_dto(html: str, matchup_url: str) -> MatchupPicksDto:
             "decision_pct": cp.fighter_2_methods.decision_pct,
         },
         matchup_url=matchup_url,
+        odds_a_american=fight.odds_f1_american,
+        odds_b_american=fight.odds_f2_american,
     )
 
 

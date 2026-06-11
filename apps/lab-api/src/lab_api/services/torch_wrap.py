@@ -61,12 +61,18 @@ class _BinaryNNWrapper:
         weight_decay: float,
         patience: int = 0,
         val_fraction: float = 0.15,
+        seed: int = 42,
     ):
         self._factory = factory
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
         self.weight_decay = weight_decay
+        # Seed for reproducibility. Without it, torch's weight init + DataLoader
+        # shuffle + dropout are random, so the same trial gives a different model
+        # (and different realworld metrics) on every run. Fixed by default so HP
+        # search trials are reproducible like CB/XGB/RF.
+        self.seed = seed
         # patience > 0 enables early stopping on an internal validation split
         # (mirrors the legacy backend's _train_pytorch_model). 0 = train epochs flat.
         self.patience = patience
@@ -102,6 +108,12 @@ class _BinaryNNWrapper:
         self._input_dim = X.shape[1]
         X_norm = self._impute(X).astype(np.float32)
 
+        # Seed BEFORE building the model so weight init is deterministic, and
+        # before the train loop so DataLoader shuffle + dropout are reproducible.
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = self._factory(self._input_dim).to(device)
         opt = torch.optim.Adam(
@@ -127,9 +139,16 @@ class _BinaryNNWrapper:
         else:
             X_tr, y_tr = X_norm, y
 
+        # drop_last=True so a trailing batch of size 1 never reaches BatchNorm,
+        # which requires >=2 samples per channel in train mode (otherwise it
+        # raises "Expected more than 1 value per channel"). With shuffle=True a
+        # different batch is dropped each epoch, so no data is lost systematically.
+        # Guard: if the dataset is smaller than one batch, keep the single batch
+        # (only safe because that batch then has >1 sample for any batch_size>1).
         loader = DataLoader(
             TensorDataset(torch.from_numpy(X_tr), torch.from_numpy(y_tr)),
-            batch_size=self.batch_size, shuffle=True, drop_last=False,
+            batch_size=self.batch_size, shuffle=True,
+            drop_last=len(X_tr) > self.batch_size,
         )
 
         best_loss = float("inf")
@@ -188,6 +207,7 @@ def make_deep_mlp(
     hidden_dims: tuple[int, ...] = (128, 64, 32),
     dropout: float = 0.3,
     patience: int = 0,
+    seed: int = 42,
 ) -> _BinaryNNWrapper:
     return _BinaryNNWrapper(
         factory=_DeepMLPFactory(list(hidden_dims), dropout=dropout),
@@ -196,6 +216,7 @@ def make_deep_mlp(
         lr=lr,
         weight_decay=weight_decay,
         patience=patience,
+        seed=seed,
     )
 
 

@@ -105,3 +105,118 @@ def test_falls_back_to_placeholder_without_url(test_engine, db_session):
     }])
     opp = db_session.query(models.Fighter).filter_by(name="Saikia Agulali").one()
     assert opp.ufcstats_url == "placeholder://Saikia Agulali"
+
+
+def test_homonym_fighters_get_distinct_slugs(test_engine, db_session):
+    """Two different people named 'Mike Davis' (distinct UFCStats URLs) must
+    both persist with distinct unique slugs — no UniqueViolation on fighter_slug_key."""
+    Base.metadata.create_all(test_engine)
+    payload = [
+        {"name": "Mike Davis", "url": "http://ufcstats.com/fighter-details/aaa111", "fights": []},
+        {"name": "Mike Davis", "url": "http://ufcstats.com/fighter-details/bbb222", "fights": []},
+    ]
+    ingest_fighters_payload(db_session, payload)
+    davises = db_session.query(models.Fighter).filter_by(name="Mike Davis").all()
+    assert len(davises) == 2
+    slugs = {f.slug for f in davises}
+    assert len(slugs) == 2          # distinct → no unique-constraint violation
+    assert "mike-davis" in slugs    # first one keeps the clean slug
+
+
+def test_homonym_ingest_is_idempotent(test_engine, db_session):
+    """Re-ingesting the same homonym payload yields the SAME slugs and no new rows."""
+    Base.metadata.create_all(test_engine)
+    payload = [
+        {"name": "Mike Davis", "url": "http://ufcstats.com/fighter-details/aaa111", "fights": []},
+        {"name": "Mike Davis", "url": "http://ufcstats.com/fighter-details/bbb222", "fights": []},
+    ]
+    ingest_fighters_payload(db_session, payload)
+    before = {f.ufcstats_url: f.slug for f in db_session.query(models.Fighter).all()}
+    ingest_fighters_payload(db_session, payload)
+    after = {f.ufcstats_url: f.slug for f in db_session.query(models.Fighter).all()}
+    assert before == after
+    assert db_session.query(models.Fighter).filter_by(name="Mike Davis").count() == 2
+
+
+def test_event_date_read_from_event_date_key(test_engine, db_session):
+    """The scraper emits the per-fight date under 'event_date'; ingest must read
+    that key (not 'date') so new events get a non-NULL date."""
+    Base.metadata.create_all(test_engine)
+    ingest_fighters_payload(db_session, [{
+        "name": "X", "url": "http://ufcstats.com/fighter-details/xkey",
+        "fights": [{
+            "event": "UFC New Card", "event_date": "2026-06-06", "opponent": "Y",
+            "opponent_url": None, "result": "win", "method": "KO", "round": 1, "time": "1:00",
+        }],
+    }])
+    ev = db_session.query(models.Event).filter_by(name="UFC New Card").one()
+    assert ev.date is not None
+    assert (ev.date.year, ev.date.month, ev.date.day) == (2026, 6, 6)
+
+
+def test_existing_event_null_date_is_backfilled(test_engine, db_session):
+    """An event row that already exists with date=NULL gets its date filled in
+    once a payload carries the event_date."""
+    Base.metadata.create_all(test_engine)
+    db_session.add(models.Event(name="UFC Old Card", date=None, status="completed"))
+    db_session.flush()
+    ingest_fighters_payload(db_session, [{
+        "name": "Z", "url": "http://ufcstats.com/fighter-details/zkey",
+        "fights": [{
+            "event": "UFC Old Card", "event_date": "2026-05-20", "opponent": "W",
+            "opponent_url": None, "result": "loss", "method": "DEC", "round": 3, "time": "5:00",
+        }],
+    }])
+    ev = db_session.query(models.Event).filter_by(name="UFC Old Card").one()
+    assert ev.date is not None
+    assert (ev.date.month, ev.date.day) == (5, 20)
+
+
+def test_is_road_to_ufc_detector():
+    from ufc_core.db.ingest import is_road_to_ufc
+    assert is_road_to_ufc("Road To UFC 5.1")
+    assert is_road_to_ufc("Road to UFC 4.3 + 4.4")
+    assert not is_road_to_ufc("UFC Fight Night: Muhammad vs. Bonfim")
+    assert not is_road_to_ufc("UFC Freedom 250")
+    assert not is_road_to_ufc(None)
+
+
+def test_road_to_ufc_event_gets_excluded_source(test_engine, db_session):
+    Base.metadata.create_all(test_engine)
+    ingest_fighters_payload(db_session, [{
+        "name": "R", "url": "http://ufcstats.com/fighter-details/rkey",
+        "fights": [{
+            "event": "Road To UFC 5.1", "event_date": "2026-05-28", "opponent": "S",
+            "opponent_url": None, "result": "win", "method": "DEC", "round": 3, "time": "5:00",
+        }],
+    }])
+    ev = db_session.query(models.Event).filter_by(name="Road To UFC 5.1").one()
+    assert ev.source == "road_to_ufc"
+
+
+def test_normal_event_keeps_scraped_source(test_engine, db_session):
+    Base.metadata.create_all(test_engine)
+    ingest_fighters_payload(db_session, [{
+        "name": "U", "url": "http://ufcstats.com/fighter-details/ukey",
+        "fights": [{
+            "event": "UFC Freedom 250", "event_date": "2026-06-14", "opponent": "V",
+            "opponent_url": None, "result": "win", "method": "KO", "round": 1, "time": "1:00",
+        }],
+    }])
+    ev = db_session.query(models.Event).filter_by(name="UFC Freedom 250").one()
+    assert ev.source == "scraped"
+
+
+def test_existing_road_to_ufc_source_corrected(test_engine, db_session):
+    Base.metadata.create_all(test_engine)
+    db_session.add(models.Event(name="Road to UFC 4.3", date=None, status="completed", source="scraped"))
+    db_session.flush()
+    ingest_fighters_payload(db_session, [{
+        "name": "R2", "url": "http://ufcstats.com/fighter-details/r2key",
+        "fights": [{
+            "event": "Road to UFC 4.3", "event_date": "2025-06-01", "opponent": "S",
+            "opponent_url": None, "result": "win", "method": "DEC", "round": 3, "time": "5:00",
+        }],
+    }])
+    ev = db_session.query(models.Event).filter_by(name="Road to UFC 4.3").one()
+    assert ev.source == "road_to_ufc"

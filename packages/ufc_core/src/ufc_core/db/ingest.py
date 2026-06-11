@@ -34,6 +34,37 @@ def _slug(name: str) -> str:
     return name.lower().replace(" ", "-")
 
 
+def _unique_slug(name: str, ufcstats_url: str, taken: set[str]) -> str:
+    """A slug not present in `taken`.
+
+    `fighter.slug` is UNIQUE but derived from the name, and UFC has homonyms
+    (two distinct 'Mike Davis'). When the plain slug is taken, disambiguate with
+    a stable token from the canonical URL (the fighter-details id), so
+    re-ingesting the same fighter yields the same slug (idempotent). Falls back
+    to a numeric suffix only if even that collides.
+    """
+    base = _slug(name)
+    if base not in taken:
+        return base
+    tail = (ufcstats_url or "").rstrip("/").rsplit("/", 1)[-1][:8]
+    candidate = f"{base}-{tail}" if tail else base
+    i = 2
+    while candidate in taken:
+        candidate = f"{base}-{tail}-{i}" if tail else f"{base}-{i}"
+        i += 1
+    return candidate
+
+
+def is_road_to_ufc(name: str | None) -> bool:
+    """True if an event is part of the 'Road to UFC' qualifier series.
+
+    These events are excluded from every calculation (ELO, training, RealWorld
+    evaluation, dashboard) via Event.source='road_to_ufc' — they are not part of
+    the UFC universe we model. Single source of truth for the detector.
+    """
+    return "road to ufc" in (name or "").lower()
+
+
 def is_dwcs_event(name: str | None) -> bool:
     """True if an event name denotes Dana White's Contender Series.
 
@@ -121,15 +152,20 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
     event_by_name: dict[str, models.Event] = {
         e.name: e for e in db.query(models.Event).all()
     }
+    # All slugs currently in use, kept in sync as we create/rename fighters so
+    # _unique_slug never collides with the UNIQUE(slug) constraint.
+    slugs_taken: set[str] = {f.slug for f in fighter_by_url.values()}
 
     for item in payload:
         url = item["url"]
         fields = _extract_fighter_fields(item)
         existing = fighter_by_url.get(url)
         if existing is None:
+            slug = _unique_slug(item["name"], url, slugs_taken)
+            slugs_taken.add(slug)
             fighter = models.Fighter(
                 name=item["name"],
-                slug=_slug(item["name"]),
+                slug=slug,
                 ufcstats_url=url,
                 record=fields["record"],
                 stance=fields["stance"],
@@ -164,15 +200,16 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
             payload_name = (item.get("name") or "").strip()
             if payload_name and payload_name != existing.name:
                 existing.name = payload_name
-                new_slug = _slug(payload_name)
-                slug_taken = (
-                    db.query(models.Fighter.id)
-                      .filter(models.Fighter.slug == new_slug,
-                              models.Fighter.id != existing.id)
-                      .first()
+                # Re-slug to the canonical name, disambiguating against every
+                # other slug in use (its own current slug is freed first).
+                new_slug = _unique_slug(
+                    payload_name, existing.ufcstats_url,
+                    slugs_taken - {existing.slug},
                 )
-                if not slug_taken:
+                if new_slug != existing.slug:
+                    slugs_taken.discard(existing.slug)
                     existing.slug = new_slug
+                    slugs_taken.add(new_slug)
             fighter = existing
             fighters_updated += 1
 
@@ -184,21 +221,37 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
             if not ev_name:
                 continue
 
+            # The scraper emits the per-fight date under "event_date"; keep a
+            # "date" fallback for any legacy payload shape.
+            ev_date = _parse_date_loose(fight.get("event_date") or fight.get("date"))
+            # Road to UFC events are excluded from every calculation via a
+            # dedicated source; everything else keeps the default "scraped".
+            ev_source = "road_to_ufc" if is_road_to_ufc(ev_name) else "scraped"
             event = event_by_name.get(ev_name)
             if event is None:
                 event = models.Event(
                     name=ev_name,
-                    date=_parse_date_loose(fight.get("date")),
+                    date=ev_date,
                     status="completed",
                     is_dwcs=is_dwcs_event(ev_name),
+                    source=ev_source,
                 )
                 db.add(event)
                 db.flush()
                 event_by_name[ev_name] = event
                 events_new += 1
-            elif event.is_dwcs != is_dwcs_event(ev_name):
-                # Keep the flag correct for events created before this was wired.
-                event.is_dwcs = is_dwcs_event(ev_name)
+            else:
+                if event.is_dwcs != is_dwcs_event(ev_name):
+                    # Keep the flag correct for events created before this was wired.
+                    event.is_dwcs = is_dwcs_event(ev_name)
+                # Stamp the excluded source onto a Road to UFC row created before
+                # this was wired (never downgrade a promoted event).
+                if ev_source == "road_to_ufc" and event.source != "road_to_ufc":
+                    event.source = "road_to_ufc"
+                # Backfill a missing date once a payload carries it (rows created
+                # before event_date was read correctly have date=NULL).
+                if event.date is None and ev_date is not None:
+                    event.date = ev_date
 
             opp_name = fight.get("opponent")
             if not opp_name:
@@ -222,9 +275,11 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                 stub_url = opp_url or f"placeholder://{opp_name}"
                 opp = fighter_by_url.get(stub_url)
             if opp is None:
+                opp_slug = _unique_slug(opp_name, stub_url, slugs_taken)
+                slugs_taken.add(opp_slug)
                 opp = models.Fighter(
                     name=opp_name,
-                    slug=_slug(opp_name),
+                    slug=opp_slug,
                     ufcstats_url=stub_url,
                 )
                 db.add(opp)

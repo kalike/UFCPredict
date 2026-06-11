@@ -108,6 +108,16 @@ def compute_fight_features(
     and age, even without full PIT mode. Falls back to now() for live
     predictions.
     """
+    # Normalize tz-aware anchors to naive. event_dates (and the datetime.min /
+    # datetime.now fallbacks below) are naive throughout the pipeline (see
+    # DataStoreDB, which strips tzinfo), so an aware Event.date passed by a
+    # caller would raise "can't compare offset-naive and offset-aware" on every
+    # date comparison.
+    if event_date is not None and event_date.tzinfo is not None:
+        event_date = event_date.replace(tzinfo=None)
+    if before_event_date is not None and before_event_date.tzinfo is not None:
+        before_event_date = before_event_date.replace(tzinfo=None)
+
     # Temporal anchor: event_date (hybrid) > before_event_date (full PIT) > now()
     ref_date = event_date or before_event_date or datetime.now()
 

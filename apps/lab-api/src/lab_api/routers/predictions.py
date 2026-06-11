@@ -590,7 +590,7 @@ def list_past_events(db: Session = Depends(get_db)) -> list[PastEventSummary]:
         # NULL source means a legacy scraped event → include it (treat NULL as UFC).
         .filter(or_(
             db_models.Event.source.is_(None),
-            db_models.Event.source.notin_(["fighter_history", "preview"]),
+            db_models.Event.source.notin_(["fighter_history", "preview", "road_to_ufc"]),
         ))
         .group_by(db_models.Event.id, db_models.Event.name, db_models.Event.date)
         .order_by(db_models.Event.date.desc().nullslast())

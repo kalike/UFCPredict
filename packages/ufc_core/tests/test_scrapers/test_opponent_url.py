@@ -36,3 +36,27 @@ def test_ignores_non_fighter_links():
         f'<p><a href="http://ufcstats.com/fight-details/zzz">view</a></p>'
     )
     assert _opponent_url_from_cell(cell, OWNER) is None
+
+
+def test_opponent_from_cell_returns_clean_name_and_url():
+    from ufc_core.scrapers.ufcstats import _opponent_from_cell
+    # The cell links BOTH fighters; the opponent name must be just the opponent,
+    # not the whole cell text (owner + opponent concatenated).
+    cell = _cell(
+        f'<p><a href="{OWNER}">Davey Grant</a></p>'
+        f'<p><a href="{OPP}">Luna Martinetti</a></p>'
+    )
+    name, url = _opponent_from_cell(cell, OWNER)
+    assert name == "Luna Martinetti"
+    assert url == OPP
+
+
+def test_opponent_from_cell_owner_second():
+    from ufc_core.scrapers.ufcstats import _opponent_from_cell
+    cell = _cell(
+        f'<p><a href="{OPP}">Luna Martinetti</a></p>'
+        f'<p><a href="{OWNER}">Davey Grant</a></p>'
+    )
+    name, url = _opponent_from_cell(cell, OWNER)
+    assert name == "Luna Martinetti"
+    assert url == OPP

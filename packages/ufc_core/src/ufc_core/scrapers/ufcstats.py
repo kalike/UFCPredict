@@ -7,6 +7,7 @@ Returns an in-memory payload dict instead of writing JSON files; persistence
 is the caller's responsibility (T11 ingest).
 """
 
+import hashlib
 import json
 import re
 import threading
@@ -62,17 +63,80 @@ def log(message: str):
 # ──────────────────────────────────────────────────────────────────────
 # UTILIDADES DE SCRAPING  (unchanged from original)
 # ──────────────────────────────────────────────────────────────────────
-def get_soup(url, max_retries: int = 5, base_backoff: float = 2.0):
-    """GET + parse with retry/backoff for 429 (rate limit) and 5xx errors.
+# ──────────────────────────────────────────────────────────────────────
+# ANTI-BOT CHALLENGE (proof-of-work interstitial)
+# ──────────────────────────────────────────────────────────────────────
+# UFCStats fronts pages with a JS interstitial ("Checking your browser…")
+# that computes sha256(nonce + ':' + n) until the hex digest starts with N
+# leading zeros, then POSTs {nonce, n} to /__c to obtain a session cookie
+# (`_fmc`). requests cannot run JS, so we solve the PoW ourselves and reuse a
+# shared Session so the cookie is sent on every subsequent request.
+_session = requests.Session()
+_session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+})
+_challenge_lock = threading.Lock()
 
-    Backs off exponentially: base * 2**attempt + small jitter. UFCStats
-    can throttle aggressively under burst — be patient and back off.
+_RE_CH_NONCE = re.compile(r'nonce\s*=\s*"([0-9a-fA-F]+)"')
+_RE_CH_ZEROS = re.compile(r"new Array\((\d+)\+1\)\.join\('0'\)")
+_RE_CH_POST = re.compile(r"\.open\(\s*'POST'\s*,\s*\"([^\"]+)\"")
+
+
+def _extract_challenge(html: str) -> tuple[str, int, str] | None:
+    """Return (nonce, leading_zeros, post_path) if html is the PoW interstitial.
+
+    Returns None for a normal page. Detection requires the interstitial marker
+    plus all three parseable fields, so a real fighters page never matches.
+    """
+    if "Checking your browser" not in html:
+        return None
+    n = _RE_CH_NONCE.search(html)
+    z = _RE_CH_ZEROS.search(html)
+    p = _RE_CH_POST.search(html)
+    if n and z and p:
+        return n.group(1), int(z.group(1)), p.group(1)
+    return None
+
+
+def _solve_pow(nonce: str, zeros: int) -> int:
+    """Smallest n such that sha256(f'{nonce}:{n}') has `zeros` leading hex zeros."""
+    target = "0" * zeros
+    n = 0
+    while not hashlib.sha256(f"{nonce}:{n}".encode()).hexdigest().startswith(target):
+        n += 1
+    return n
+
+
+def _pass_challenge(challenge: tuple[str, int, str], page_url: str) -> None:
+    """Solve the PoW and POST it so the shared session gets the access cookie."""
+    from urllib.parse import urljoin
+    nonce, zeros, post_path = challenge
+    with _challenge_lock:
+        n = _solve_pow(nonce, zeros)
+        log(f"  🧩 solved UFCStats PoW challenge (zeros={zeros}, n={n})")
+        _session.post(
+            urljoin(page_url, post_path),
+            data={"nonce": nonce, "n": n},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=20,
+        )
+
+
+def get_soup(url, max_retries: int = 5, base_backoff: float = 2.0):
+    """GET + parse with retry/backoff for 429/5xx, and the PoW anti-bot challenge.
+
+    Backs off exponentially: base * 2**attempt + small jitter. When the response
+    is the anti-bot interstitial, solve the proof-of-work, submit it, and retry
+    the same URL (now with the session cookie) — this counts as an attempt.
     """
     import random
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, timeout=20)
+            response = _session.get(url, timeout=20)
             if response.status_code == 429:
                 # Honour Retry-After header when present, else exponential backoff
                 ra = response.headers.get("Retry-After")
@@ -90,6 +154,10 @@ def get_soup(url, max_retries: int = 5, base_backoff: float = 2.0):
                 time.sleep(wait)
                 continue
             response.raise_for_status()
+            challenge = _extract_challenge(response.text)
+            if challenge is not None:
+                _pass_challenge(challenge, response.url)
+                continue  # retry the GET with the access cookie now set
             return BeautifulSoup(response.text, "html.parser")
         except requests.exceptions.RequestException as e:
             last_exc = e
@@ -163,19 +231,25 @@ def _parse_event_cell(cell) -> tuple[str, str | None]:
     return event_name, iso_date
 
 
-def _opponent_url_from_cell(cell, owner_url: str) -> str | None:
-    """Return the opponent's UFCStats fighter-details URL from the 'Fighter' cell.
+def _opponent_from_cell(cell, owner_url: str) -> tuple[str, str | None]:
+    """Return (opponent_name, opponent_url) from the 'Fighter' cell.
 
-    The cell links both fighters of the bout; the opponent is the fighter-details
-    anchor whose href is not the page owner's. Returns None if absent (e.g. the
-    opponent has no UFCStats page). This is the canonical identity we resolve on
-    at ingest time, instead of the (sometimes truncated) display name.
+    The cell links BOTH fighters of the bout; the opponent is the fighter-details
+    anchor whose href is not the page owner's. We take the name from that anchor
+    rather than cell.text — the latter concatenates owner + opponent (with
+    whitespace), which corrupts the display name. Falls back to the raw cell text
+    when no opponent anchor exists (opponent has no UFCStats page).
     """
     for a in cell.find_all("a"):
         href = (a.get("href") or "").strip()
         if "fighter-details/" in href and href != owner_url:
-            return href
-    return None
+            return a.get_text(strip=True), href
+    return cell.get_text(" ", strip=True), None
+
+
+def _opponent_url_from_cell(cell, owner_url: str) -> str | None:
+    """Opponent's UFCStats fighter-details URL, or None. See _opponent_from_cell."""
+    return _opponent_from_cell(cell, owner_url)[1]
 
 
 def parse_fighter_page(fighter_url: str) -> dict:
@@ -212,10 +286,11 @@ def parse_fighter_page(fighter_url: str) -> dict:
             continue
 
         event_name, event_date = _parse_event_cell(cols[6])
+        opp_name, opp_url = _opponent_from_cell(cols[1], fighter_url)
         fight_data = {
             "result": cols[0].text.strip(),
-            "opponent": cols[1].text.strip(),
-            "opponent_url": _opponent_url_from_cell(cols[1], fighter_url),
+            "opponent": opp_name,
+            "opponent_url": opp_url,
             "event": event_name,
             "event_date": event_date,
             "method": cols[7].text.strip(),

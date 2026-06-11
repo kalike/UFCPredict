@@ -65,7 +65,7 @@ def build_matchers(
         for f in session.query(Fighter).all()
     ]
     fight_q = session.query(Fight).filter(
-        Fight.event_id.isnot(None), Fight.opponent_id.isnot(None)
+        Fight.event_id.isnot(None), Fight.fighter_2_id.isnot(None)
     )
     if restrict_event_ids:
         fight_q = fight_q.filter(Fight.event_id.in_(restrict_event_ids))
@@ -73,12 +73,24 @@ def build_matchers(
         FightCandidate(
             id=fi.id,
             event_id=fi.event_id,
-            fighter_id=fi.fighter_id,
-            opponent_id=fi.opponent_id,
+            fighter_id=fi.fighter_1_id,
+            opponent_id=fi.fighter_2_id,
         )
         for fi in fight_q.all()
     ]
     return FighterMatcher(fighter_cands, aliases), FightMatcher(fight_cands), aliases
+
+
+def _orient_odds(
+    fight_f1_id: int, a_id: int, odds_a: int | None, odds_b: int | None
+) -> tuple[int | None, int | None]:
+    """Map (fighter_a, fighter_b) odds onto a Fight row's (f1, f2) positions.
+
+    The DTO carries odds for fighter_a/fighter_b (Tapology order); the Fight row
+    stores them by fighter_1/fighter_2. Returns (odds_f1, odds_f2)."""
+    if a_id == fight_f1_id:
+        return odds_a, odds_b
+    return odds_b, odds_a
 
 
 async def process_matchup_dto(
@@ -150,6 +162,18 @@ async def process_matchup_dto(
         ),
         force=force,
     )
+
+    # Persist the scraped American odds onto the Fight row, oriented to its
+    # fighter_1/fighter_2 positions. Tapology is the odds source of truth; only
+    # write when both lines are present so we never blank existing odds.
+    if dto.odds_a_american is not None and dto.odds_b_american is not None:
+        fight_row = session.query(Fight).filter_by(id=fight_db_id).one()
+        o1, o2 = _orient_odds(
+            fight_row.fighter_1_id, a_id, dto.odds_a_american, dto.odds_b_american
+        )
+        fight_row.odds_f1_american = o1
+        fight_row.odds_f2_american = o2
+
     session.commit()
     retry_q.remove(dto.matchup_url)
     return True, "ok"
@@ -197,15 +221,12 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
     _, TapologyHistoricalScraper = _lazy_scraper()
     scraper = TapologyHistoricalScraper(concurrency=2, delay=0.5)
 
-    user_agent = (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    )
-
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent=user_agent)
+        # WebKit with its default UA: Cloudflare blocks Playwright Chromium and
+        # Firefox, and a spoofed Chrome UA on another engine is itself a
+        # detection signal. Mirrors the legacy backend's tapology_orchestrator.
+        browser = await pw.webkit.launch(headless=True)
+        context = await browser.new_context()
         try:
             with SyncSessionLocal() as session:
                 # Source of truth: events recent enough to plausibly need picks.
@@ -218,6 +239,9 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
                     .filter(
                         Event.date.isnot(None),
                         Event.date >= date_floor,
+                        # Exclude non-UFC-universe events (Road to UFC qualifiers,
+                        # fighter-history, ad-hoc previews) from picks scraping.
+                        Event.source.notin_(("road_to_ufc", "fighter_history", "preview")),
                     )
                     .all()
                 )
@@ -236,7 +260,7 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
                 for row in event_rows:
                     fight_ids = {
                         fid for (fid,) in session.query(Fight.id)
-                        .filter(Fight.event_id == row.id, Fight.opponent_id.isnot(None))
+                        .filter(Fight.event_id == row.id, Fight.fighter_2_id.isnot(None))
                         .all()
                     }
                     if not fight_ids:

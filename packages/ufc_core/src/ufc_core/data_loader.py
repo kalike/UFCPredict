@@ -72,6 +72,12 @@ class DataStoreDB(BaseDataStore):
             if rr.fighter_id not in latest_raw and isinstance(rr.payload, dict):
                 latest_raw[rr.fighter_id] = rr.payload
 
+        # Canonical name per UFCStats URL — used to repair garbled opponent
+        # names. The scraper stores the opponent as the whole "Fighter" cell
+        # text (owner + opponent concatenated); opponent_url is reliable, so we
+        # resolve the display name from it without re-scraping.
+        url_to_name = {f.ufcstats_url: f.name for f in rows if f.ufcstats_url}
+
         self.fighters_raw = []
         self.fighter_lookup = {}
         for f in rows:
@@ -81,6 +87,12 @@ class DataStoreDB(BaseDataStore):
                 # keep canonical casing from the fighter table.
                 fdict = dict(payload)
                 fdict["name"] = f.name
+                fdict["fights"] = [
+                    ({**ft, "opponent": url_to_name[ou]}
+                     if (ou := ft.get("opponent_url")) and ou in url_to_name
+                     else ft)
+                    for ft in fdict.get("fights", [])
+                ]
             else:
                 # Fallback: minimal dict from fighter table columns (no history).
                 fdict = {
@@ -121,9 +133,11 @@ class DataStoreDB(BaseDataStore):
         self.event_locations = {}
         excluded_non_ufc = 0
         for ev in rows:
-            # preview = ad-hoc user matchups not yet promoted; no real results,
-            # must not leak into PIT date lookups or the ELO/training universe.
-            if ev.source in ("fighter_history", "preview"):
+            # preview = ad-hoc user matchups not yet promoted; no real results.
+            # road_to_ufc = the Asian qualifier series, excluded from every
+            # calculation. None must leak into PIT date lookups or the
+            # ELO/training universe. This is the central gatekeeper.
+            if ev.source in ("fighter_history", "preview", "road_to_ufc"):
                 excluded_non_ufc += 1
                 continue
             if ev.date:

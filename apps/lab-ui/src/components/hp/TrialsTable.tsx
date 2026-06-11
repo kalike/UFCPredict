@@ -96,7 +96,7 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
           </tr>
         </thead>
         <tbody>
-          {sorted.slice(0, 60).map((t) => {
+          {sorted.slice(0, 200).map((t) => {
             const folds = t.metrics?.fold_accuracies ?? [];
             const rvBuckets = t.metrics?.realworld_value?.buckets ?? [];
             const canExpand = folds.length > 0 || rvBuckets.length > 0;
