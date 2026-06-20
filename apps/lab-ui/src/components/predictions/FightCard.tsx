@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { GitCompareArrows, AlertTriangle, Trophy, Ban } from "lucide-react";
+import { GitCompareArrows, AlertTriangle, Trophy, Ban, CheckCircle2, XCircle } from "lucide-react";
 import type { RichFightPrediction } from "../../api/client";
 import { PredictionBar } from "../compare/PredictionBar";
 import { FighterAvatar } from "./FighterAvatar";
@@ -38,16 +38,52 @@ export function FightCard({ fight, canMark = false, onMark }: FightCardProps) {
   }
 
   const pickWinner = consensus?.consensus_winner;
+  // A fight is "decided" once we know both the model pick and the real winner;
+  // only then can we render a hit/miss verdict.
+  const decided = !!(real_winner && pickWinner);
+  const hit = decided && pickWinner === real_winner;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className="rounded-lg border border-border bg-card p-4 space-y-3"
+      className={`rounded-lg border bg-card p-4 space-y-3 ${
+        decided
+          ? hit
+            ? "border-success/60 ring-1 ring-success/40"
+            : "border-destructive/60 ring-1 ring-destructive/40"
+          : "border-border"
+      }`}
     >
       {/* Banners */}
-      {real_winner && (
+      {decided && (
+        <div
+          className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium border ${
+            hit
+              ? "bg-success/15 border-success/40 text-success"
+              : "bg-destructive/15 border-destructive/40 text-destructive"
+          }`}
+        >
+          {hit ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+          {hit ? (
+            <span>
+              <span className="font-bold uppercase tracking-wide">Acertado</span>
+              {" · Pick: "}
+              <span className="font-semibold">{pickWinner}</span>
+            </span>
+          ) : (
+            <span>
+              <span className="font-bold uppercase tracking-wide">Fallado</span>
+              {" · Pick: "}
+              <span className="font-semibold">{pickWinner}</span>
+              {" → ganó "}
+              <span className="font-semibold">{real_winner}</span>
+            </span>
+          )}
+        </div>
+      )}
+      {real_winner && !pickWinner && (
         <div className="flex items-center gap-2 rounded-md bg-success/10 border border-success/30 px-3 py-1.5 text-xs text-success">
           <Trophy size={13} /> Ganador real: <span className="font-semibold">{real_winner}</span>
         </div>
@@ -63,13 +99,18 @@ export function FightCard({ fight, canMark = false, onMark }: FightCardProps) {
         </div>
       )}
 
-      {/* Pick banner */}
+      {/* Pick banner — when decided, the pick is already named in the verdict
+          banner above, so we keep just the consensus badge (votes / %). */}
       {pickWinner && consensus && (
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <span className="text-sm">
-            <span className="text-muted-foreground">Pick: </span>
-            <span className="font-semibold text-foreground">{pickWinner}</span>
-          </span>
+          {decided ? (
+            <span />
+          ) : (
+            <span className="text-sm">
+              <span className="text-muted-foreground">Pick: </span>
+              <span className="font-semibold text-foreground">{pickWinner}</span>
+            </span>
+          )}
           <ConsensusBadge consensus={consensus} />
         </div>
       )}

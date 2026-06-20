@@ -29,6 +29,14 @@ export function useSessions() {
   });
 }
 
+export function useRealworldSessions() {
+  return useQuery({
+    queryKey: ["predictions", "realworld-sessions"],
+    queryFn: api.listRealworldSessions,
+    staleTime: 60 * 1000,
+  });
+}
+
 export function useSession(id: number | null) {
   return useQuery({
     queryKey: ["predictions", "session", id],

@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ufc_core.db.engine import SessionLocal as SyncSessionLocal
-from ufc_core.db.models import Event, Fighter, FighterRaw
+from ufc_core.db.models import Event, Fight, Fighter, FighterRaw
 from ufc_core.data_loader_base import BaseDataStore
 from ufc_core.features.engine import build_fighter_histories
 from ufc_core.parsers import american_to_decimal
@@ -78,6 +78,32 @@ class DataStoreDB(BaseDataStore):
         # resolve the display name from it without re-scraping.
         url_to_name = {f.ufcstats_url: f.name for f in rows if f.ufcstats_url}
 
+        # Fallback for fights that lack opponent_url (the URL path can't repair
+        # them): an alias from the fight table by id. Maps
+        # (owner_fighter_id, event_name) -> canonical opponent name, both ways.
+        # A fighter has one fight per event, so the key is unique. This is what
+        # repairs the ~2% of history fights (asian/compound names) the scraper
+        # stored without an opponent_url.
+        id_to_name = {f.id: f.name for f in rows}
+        opp_alias: dict[tuple[int, str], str] = {}
+        for i1, i2, ev_name in db.execute(
+            select(Fight.fighter_1_id, Fight.fighter_2_id, Event.name)
+            .join(Event, Event.id == Fight.event_id)
+        ).all():
+            n1, n2 = id_to_name.get(i1), id_to_name.get(i2)
+            if n1 and n2:
+                opp_alias[(i1, ev_name)] = n2
+                opp_alias[(i2, ev_name)] = n1
+
+        def _repair_opponent(ft: dict, owner_id: int) -> dict:
+            ou = ft.get("opponent_url")
+            if ou and ou in url_to_name:
+                return {**ft, "opponent": url_to_name[ou]}
+            canon = opp_alias.get((owner_id, ft.get("event", "")))
+            if canon:
+                return {**ft, "opponent": canon}
+            return ft
+
         self.fighters_raw = []
         self.fighter_lookup = {}
         for f in rows:
@@ -88,9 +114,7 @@ class DataStoreDB(BaseDataStore):
                 fdict = dict(payload)
                 fdict["name"] = f.name
                 fdict["fights"] = [
-                    ({**ft, "opponent": url_to_name[ou]}
-                     if (ou := ft.get("opponent_url")) and ou in url_to_name
-                     else ft)
+                    _repair_opponent(ft, f.id)
                     for ft in fdict.get("fights", [])
                 ]
             else:

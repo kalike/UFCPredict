@@ -602,6 +602,7 @@ export const api = {
       method: "POST", body: JSON.stringify(body),
     }),
   listSessions: () => request<SessionSummary[]>("/predictions/sessions"),
+  listRealworldSessions: () => request<SessionSummary[]>("/predictions/sessions/realworld"),
   getSession: (id: number) => request<SessionDetail>(`/predictions/sessions/${id}`),
   markResult: (id: number, fight_index: number, real_winner: string | null) =>
     request<MarkResultResponse>(`/predictions/sessions/${id}/result`, {
