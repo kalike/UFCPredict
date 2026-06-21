@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import {
-  Activity, Boxes, Cpu, Database, GitCompareArrows, Hammer,
+  Activity, Boxes, Coins, Cpu, Database, GitCompareArrows, Hammer,
   Rocket, RotateCcw, Search, Users,
 } from "lucide-react";
 
@@ -11,6 +11,7 @@ const nav = [
   { to: "/hp-search",     label: "HP Search",     icon: Search },
   { to: "/scraping",      label: "Scraping",      icon: Database },
   { to: "/predictions",   label: "Predictions",   icon: Cpu },
+  { to: "/betting",       label: "Apuestas",      icon: Coins },
   { to: "/fighters",      label: "Fighters",      icon: Users },
   { to: "/compare",       label: "Compare",       icon: GitCompareArrows },
   { to: "/publish",       label: "Publish",       icon: Rocket },

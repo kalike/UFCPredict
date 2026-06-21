@@ -203,10 +203,45 @@ def test_summary_endpoint_shape(client):
         "latest_event", "n_past_events", "n_fighters", "n_models", "models",
         "avg_by_model", "accuracy_by_event", "recent_fights",
         "consensus_tiers", "probability_tiers", "special_case_tiers",
-        "special_case_fights", "disabled_models", "min_fights",
+        "special_case_fights", "disabled_models", "min_fights", "with_odds",
     ):
         assert key in body, f"missing {key}"
     assert isinstance(body["models"], list)
+    assert body["with_odds"] is False
+
+
+def test_with_odds_restricts_to_fights_with_odds(client):
+    """with_odds=True ("universo apostable") only aggregates RealWorld fights
+    that carry odds on both sides — a filter analogous to min_fights, no model
+    re-evaluation. Seeds one card whose 2 fights have odds on only one of them.
+    """
+    from ufc_core.db.engine import SessionLocal
+    from ufc_core.db import models as m
+    from lab_api.deps import get_data_store
+    ds = get_data_store()
+    db = SessionLocal()
+    try:
+        _seed_realworld_event(db, event_name="UFC Odds Toggle", suffix="odds")
+        ev = db.query(m.Event).filter_by(name="UFC Odds Toggle").one()
+        # Odds only on fight_order=1 (Alpha vs Bravo, the correct pick).
+        f1 = db.query(m.Fight).filter_by(event_id=ev.id, fight_order=1).one()
+        f1.odds_f1_american = -150
+        f1.odds_f2_american = 130
+        db.commit()
+        dsvc.invalidate()
+        full = dsvc.build_summary(db, ds, min_fights=0)
+        apostable = dsvc.build_summary(db, ds, min_fights=0, with_odds=True)
+    finally:
+        db.close()
+    full_ev = {e["event"]: e for e in full["accuracy_by_event"]}["UFC Odds Toggle"]
+    apost_map = {e["event"]: e for e in apostable["accuracy_by_event"]}
+    assert full["with_odds"] is False
+    assert apostable["with_odds"] is True
+    # Full view: both fights counted. Apostable: only the one with odds.
+    assert full_ev["n_fights_valid"] == 2
+    apost_ev = apost_map["UFC Odds Toggle"]
+    assert apost_ev["n_fights_valid"] == 1
+    assert apost_ev["n_correct"] == 1  # the fight with odds was the correct pick
 
 
 def test_event_fights_404_when_unknown(client):

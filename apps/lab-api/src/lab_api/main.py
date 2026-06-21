@@ -8,8 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from lab_api.routers import (
-    combo_search, compare, dashboard, fighters, hp_search,
+    betting, combo_search, compare, dashboard, fighters, hp_search,
     models as models_router, predictions, publish, recalculation, scraping, system,
+    user_bets,
 )
 
 # Prevent OpenMP segfault when PyTorch and LightGBM both load libomp on macOS
@@ -48,6 +49,8 @@ app.include_router(compare.router)
 app.include_router(predictions.router)
 app.include_router(recalculation.router)
 app.include_router(dashboard.router)
+app.include_router(betting.router)
+app.include_router(user_bets.router)
 
 
 def run():

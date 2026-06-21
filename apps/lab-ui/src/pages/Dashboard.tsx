@@ -21,7 +21,11 @@ import EventResultsPanel from "../components/dashboard/EventResultsPanel";
 export default function Dashboard() {
   const qc = useQueryClient();
   const [minFights, setMinFights] = useState(0);
-  const { data, isLoading, isError, error, refetch } = useDashboard(minFights);
+  // "Universo apostable": restringe los KPIs a peleas RealWorld con odds en
+  // ambos lados (las que de verdad apostarías). Filtro de agregación, no
+  // re-evalúa modelos.
+  const [withOdds, setWithOdds] = useState(false);
+  const { data, isLoading, isError, error, refetch } = useDashboard(minFights, withOdds);
   const invalidate = useInvalidateDashboard();
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [specialTier, setSpecialTier] = useState<string | null>(null);
@@ -58,6 +62,12 @@ export default function Dashboard() {
       <Input type="number" value={minFights}
              onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
              className="w-20" />
+      <label className="flex items-center gap-2 text-xs text-muted-foreground"
+             title="Restringe los KPIs a peleas con odds en ambos lados (universo apostable)">
+        <input type="checkbox" checked={withOdds}
+               onChange={(e) => setWithOdds(e.target.checked)} />
+        Solo peleas con odds
+      </label>
       <Button variant="primary" disabled={recalcActive || invalidate.isPending}
               onClick={startRecalc}>
         {recalcActive ? "Recalculando…" : "Actualizar"}

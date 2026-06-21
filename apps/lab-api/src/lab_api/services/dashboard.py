@@ -176,8 +176,17 @@ def _models_present(db, session_ids: list[int]) -> list[str]:
     return ordered + extra
 
 
-def build_summary(db, ds, min_fights: int = 0) -> dict:
+def build_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
     from ufc_core.db import models as m
+
+    # "Universo apostable": cuando with_odds, restringimos la agregación a las
+    # peleas RealWorld con odds en ambos lados (las que de verdad apostarías).
+    # Es un filtro de agregación análogo a min_fights — NO re-evalúa modelos,
+    # solo descarta peleas sin odds del cómputo de accuracy/consenso/tiers.
+    odds_lookup = None
+    if with_odds:
+        from lab_api.services.training import _load_realworld_odds
+        odds_lookup = _load_realworld_odds()
 
     sessions_by_event = _realworld_sessions_by_event(db)
     session_ids = [s.id for s in sessions_by_event.values()]
@@ -228,6 +237,9 @@ def build_summary(db, ds, min_fights: int = 0) -> dict:
             f2_hist = bool(ds.fighter_histories.get(f2n))
             f1_dwcs = _has_only_dwcs(ds, f1n, ev_dt) if ev_dt else False
             f2_dwcs = _has_only_dwcs(ds, f2n, ev_dt) if ev_dt else False
+            # Universo apostable: descarta peleas sin odds en ambos lados.
+            if odds_lookup is not None and (ev.name, frozenset({f1n, f2n})) not in odds_lookup:
+                continue
             probs = preds_by_fight.get(ft.id, {})
             has_consensus = len(probs) > 0
             predicted = None
@@ -344,6 +356,7 @@ def build_summary(db, ds, min_fights: int = 0) -> dict:
         "recent_fights": all_fight_rows[:20],
         "disabled_models": [],
         "min_fights": min_fights,
+        "with_odds": with_odds,
         "consensus_tiers": {k: _finalize_tier(v) for k, v in cons_tiers.items()},
         "probability_tiers": {k: _finalize_tier(v) for k, v in prob_tiers.items()},
         "special_case_tiers": {k: _finalize_tier(v) for k, v in spec_tiers.items()},
@@ -398,11 +411,12 @@ def invalidate() -> None:
         _cache.clear()
 
 
-def get_summary(db, ds, min_fights: int = 0) -> dict:
+def get_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
+    key = (min_fights, with_odds)
     with _cache_lock:
-        if min_fights in _cache:
-            return _cache[min_fights]
-    data = build_summary(db, ds, min_fights)
+        if key in _cache:
+            return _cache[key]
+    data = build_summary(db, ds, min_fights, with_odds=with_odds)
     with _cache_lock:
-        _cache[min_fights] = data
+        _cache[key] = data
     return data

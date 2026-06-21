@@ -11,9 +11,13 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/summary")
-def summary(min_fights: int = Query(0, ge=0), db: Session = Depends(get_db)) -> dict:
+def summary(
+    min_fights: int = Query(0, ge=0),
+    with_odds: bool = Query(False),
+    db: Session = Depends(get_db),
+) -> dict:
     ds = get_data_store()
-    return dsvc.get_summary(db, ds, min_fights=min_fights)
+    return dsvc.get_summary(db, ds, min_fights=min_fights, with_odds=with_odds)
 
 
 @router.get("/event-fights")

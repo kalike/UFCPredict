@@ -1237,6 +1237,14 @@ def promote_session(
     ev.status = "completed"
     n_fights = db.query(db_models.Fight).filter_by(event_id=ev.id).count()
     db.commit()
+    # Auto-resolve any pending user bets for this event now that real_winners
+    # are visible. Best-effort: never break promotion if resolution fails.
+    try:
+        from lab_api.services.user_bets import resolve_pending_on_promotion
+        if ev is not None:
+            resolve_pending_on_promotion(db, ev.name)
+    except Exception:  # noqa: BLE001
+        pass
     return PromoteResponse(
         ok=True, event=ev.name, n_fights=n_fights,
         message="Session promoted to historical event",
