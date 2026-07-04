@@ -53,6 +53,7 @@ from ufc_core.config import BASE_ELO as _CFG_BASE_ELO
 from ufc_core.config import ELO_RATINGS as ELO_RATINGS_PATH
 from ufc_core.config import MODELS_DIR
 from ufc_core.config import REALWORLD_CUTOFF_DATE, TEST_CUTOFF_DATE
+from ufc_core.tta import build_tta_flip
 # DeepMLP, TabularResNet imported lazily from .pytorch_architectures
 # to avoid loading torch/libomp at module level (conflicts with LightGBM on macOS ARM)
 
@@ -1052,12 +1053,10 @@ def evaluate_realworld(
     else:
         X_rw_sc = X_rw
 
-    # TTA flip: negate for 35f (delta_*), swap halves for 52f (f1_*/f2_*)
-    if is_52f:
-        n_half = sum(1 for c in feat_cols if c.startswith("f1_"))
-        X_rw_flip = np.hstack([X_rw[:, n_half:], X_rw[:, :n_half]])
-    else:
-        X_rw_flip = -X_rw
+    # TTA flip: swap f1_/f2_ pairs, negate delta_*, leave symmetric cols intact
+    # (build_tta_flip handles V7's appended tap_* scalars; a naive half-swap
+    # would scramble every column past the f1/f2 split — see ufc_core.tta).
+    X_rw_flip = build_tta_flip(X_rw, feat_cols)
 
     if scaler is not None:
         X_rw_flip_sc = scaler.transform(X_rw_flip)
@@ -1143,6 +1142,10 @@ def evaluate_realworld(
             proba_rw, y_rw,
             pd.to_numeric(rw["odds_f1_american"], errors="coerce").to_numpy(dtype=float),
             pd.to_numeric(rw["odds_f2_american"], errors="coerce").to_numpy(dtype=float),
+            event_dates=(
+                pd.to_datetime(rw["event_date"]).to_numpy()
+                if "event_date" in rw.columns else None
+            ),
         )
         if rv is not None:
             result["realworld_value"] = rv
@@ -1266,13 +1269,9 @@ def _build_calibration_from_predictions(
     X = df_cal[feat_cols].values.astype(np.float32)
     np.nan_to_num(X, copy=False, nan=0.0)
 
-    # TTA flip
-    is_52f = feat_type == "52f"
-    if is_52f:
-        n_half = sum(1 for c in feat_cols if c.startswith("f1_"))
-        X_flip = np.hstack([X[:, n_half:], X[:, :n_half]])
-    else:
-        X_flip = -X
+    # TTA flip (shared helper: swaps f1_/f2_ pairs, negates delta_*, keeps
+    # symmetric columns — correct for V7's appended tap_* scalars).
+    X_flip = build_tta_flip(X, feat_cols)
 
     # Scale
     if scaler is not None:

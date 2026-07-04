@@ -37,6 +37,7 @@ class VersionSummary(BaseModel):
     artifact_uri: str
     metrics_json: dict | None
     hp_json: dict | None
+    trained_at: str | None = None
     starred: bool
     was_production: bool
     note: str | None
@@ -90,6 +91,40 @@ class TrainStatus(BaseModel):
 class MarkRequest(BaseModel):
     starred: bool | None = None
     note: str | None = None
+
+
+class ApplyComboRequest(BaseModel):
+    combo: dict[str, int]   # {short: version_idx}
+
+
+@router.get("/current-combo", response_model=dict[str, int])
+def current_combo(db: Session = Depends(get_db)) -> dict[str, int]:
+    """Snapshot of currently active models → {short: active_version_idx}."""
+    out: dict[str, int] = {}
+    for m in db.query(db_models.Model).all():
+        am = db.query(db_models.ActiveModel).filter_by(model_id=m.id).one_or_none()
+        if am is None:
+            continue
+        v = db.query(db_models.ModelVersion).filter_by(id=am.version_id).one_or_none()
+        if v is not None:
+            out[m.short] = v.version_idx
+    return out
+
+
+@router.post("/apply-combo")
+def apply_combo(req: ApplyComboRequest, db: Session = Depends(get_db)) -> dict:
+    """Activate a saved combo (best-effort): set each (short, version_idx) active."""
+    reg = ModelRegistry(db)
+    applied: list[dict] = []
+    skipped: list[dict] = []
+    for short, version_idx in req.combo.items():
+        try:
+            reg.set_active(short, version_idx)
+            applied.append({"short": short, "version_idx": version_idx})
+        except KeyError as e:
+            skipped.append({"short": short, "version_idx": version_idx, "reason": str(e)})
+    db.commit()
+    return {"applied": applied, "skipped": skipped}
 
 
 @router.get("/trainable", response_model=list[TrainableModel])

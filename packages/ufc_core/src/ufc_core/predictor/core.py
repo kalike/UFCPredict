@@ -11,6 +11,7 @@ import pandas as pd
 from ufc_core.config import TEMPERATURE
 from ufc_core.models.registry import ModelRegistry
 from ufc_core.trainer.core import get_disabled_models
+from ufc_core.tta import build_tta_flip
 
 
 def _temperature_scale(proba: np.ndarray, temperature: float | None = None) -> np.ndarray:
@@ -46,8 +47,8 @@ def _prepare_inputs(df: pd.DataFrame, registry: ModelRegistry) -> dict:
     X_35_svm_std_flip = registry.svm_std_scaler.transform(X_35_neg)
     X_35_svm_rob_flip = registry.svm_rob_scaler.transform(X_35_neg)
 
-    # 52f flip: swap f1_* ↔ f2_* columns (26 + 26)
-    X_52_flip = np.hstack([X_52[:, 26:], X_52[:, :26]])
+    # 52f flip: swap f1_* ↔ f2_* columns by suffix (shared helper)
+    X_52_flip = build_tta_flip(X_52, registry.feats_52)
 
     return {
         "X_35": X_35,
@@ -111,13 +112,9 @@ def _get_model_inputs(
         np.nan_to_num(X, copy=False, nan=0.0)
         X = transformer.transform_array(X, feat_cols)
 
-        # TTA flip: swap f1/f2 halves for 52f, negate for 35f (deltas)
-        is_52f = any(c.startswith("f1_") for c in feat_cols)
-        if is_52f:
-            n_half = sum(1 for c in feat_cols if c.startswith("f1_"))
-            X_flip = np.hstack([X[:, n_half:], X[:, :n_half]])
-        else:
-            X_flip = -X
+        # TTA flip: swap f1_/f2_ pairs, negate delta_*, keep symmetric cols
+        # (shared helper — correct for V7's appended tap_* scalars).
+        X_flip = build_tta_flip(X, feat_cols)
 
         if per_scaler is not None:
             return per_scaler.transform(X), per_scaler.transform(X_flip)

@@ -203,10 +203,112 @@ def test_summary_endpoint_shape(client):
         "latest_event", "n_past_events", "n_fighters", "n_models", "models",
         "avg_by_model", "accuracy_by_event", "recent_fights",
         "consensus_tiers", "probability_tiers", "special_case_tiers",
-        "special_case_fights", "disabled_models", "min_fights",
+        "special_case_fights", "disabled_models", "min_fights", "with_odds",
+        "unanimous_only",
     ):
         assert key in body, f"missing {key}"
     assert isinstance(body["models"], list)
+    assert body["with_odds"] is False
+    assert body["unanimous_only"] is False
+
+
+def test_with_odds_restricts_to_fights_with_odds(client):
+    """with_odds=True ("universo apostable") only aggregates RealWorld fights
+    that carry odds on both sides — a filter analogous to min_fights, no model
+    re-evaluation. Seeds one card whose 2 fights have odds on only one of them.
+    """
+    from ufc_core.db.engine import SessionLocal
+    from ufc_core.db import models as m
+    from lab_api.deps import get_data_store
+    ds = get_data_store()
+    db = SessionLocal()
+    try:
+        _seed_realworld_event(db, event_name="UFC Odds Toggle", suffix="odds")
+        ev = db.query(m.Event).filter_by(name="UFC Odds Toggle").one()
+        # Odds only on fight_order=1 (Alpha vs Bravo, the correct pick).
+        f1 = db.query(m.Fight).filter_by(event_id=ev.id, fight_order=1).one()
+        f1.odds_f1_american = -150
+        f1.odds_f2_american = 130
+        db.commit()
+        dsvc.invalidate()
+        full = dsvc.build_summary(db, ds, min_fights=0)
+        apostable = dsvc.build_summary(db, ds, min_fights=0, with_odds=True)
+    finally:
+        db.close()
+    full_ev = {e["event"]: e for e in full["accuracy_by_event"]}["UFC Odds Toggle"]
+    apost_map = {e["event"]: e for e in apostable["accuracy_by_event"]}
+    assert full["with_odds"] is False
+    assert apostable["with_odds"] is True
+    # Full view: both fights counted. Apostable: only the one with odds.
+    assert full_ev["n_fights_valid"] == 2
+    apost_ev = apost_map["UFC Odds Toggle"]
+    assert apost_ev["n_fights_valid"] == 1
+    assert apost_ev["n_correct"] == 1  # the fight with odds was the correct pick
+
+
+def test_unanimous_only_filters_non_consensus(client):
+    """unanimous_only=True restricts every KPI to fights where all models agree
+    on the winner (the betting-strategy universe). Seeds one unanimous fight and
+    one 3-1 split; only the unanimous one survives the filter."""
+    from datetime import datetime, UTC
+    from ufc_core.db.engine import SessionLocal
+    from ufc_core.db import models as m
+    from lab_api.deps import get_data_store
+    ds = get_data_store()
+    db = SessionLocal()
+    try:
+        fa = _mk_fighter(db, "Uno u", "uno-u")
+        fb = _mk_fighter(db, "Dos u", "dos-u")
+        fc = _mk_fighter(db, "Tres u", "tres-u")
+        fd = _mk_fighter(db, "Cuatro u", "cuatro-u")
+        ev = m.Event(name="UFC Unanimity", date=datetime(2025, 6, 2, tzinfo=UTC),
+                     location="X", status="completed", source="scraped")
+        db.add(ev); db.flush()
+        f1 = m.Fight(event_id=ev.id, fighter_1_id=fa.id, fighter_2_id=fb.id,
+                     result="win", fight_order=1)
+        f2 = m.Fight(event_id=ev.id, fighter_1_id=fc.id, fighter_2_id=fd.id,
+                     result="win", fight_order=2)
+        db.add_all([f1, f2]); db.flush()
+        sess = m.PredictionSession(event_id=ev.id, source="lab_recalc", status="completed")
+        db.add(sess); db.flush()
+        for s in ("XGB", "RF", "CB", "Deep"):  # fight 1: all pick f1 (unanimous)
+            db.add(m.Prediction(session_id=sess.id, fight_id=f1.id, model_short=s,
+                                version_idx=0, prob_f1=0.80, prob_f2=0.20))
+        for s in ("XGB", "RF", "CB"):          # fight 2: 3 pick f1...
+            db.add(m.Prediction(session_id=sess.id, fight_id=f2.id, model_short=s,
+                                version_idx=0, prob_f1=0.70, prob_f2=0.30))
+        db.add(m.Prediction(session_id=sess.id, fight_id=f2.id, model_short="Deep",
+                            version_idx=0, prob_f1=0.30, prob_f2=0.70))  # ...1 dissents (3-1)
+        db.commit()
+        dsvc.invalidate()
+        full = dsvc.build_summary(db, ds, min_fights=0)
+        unan = dsvc.build_summary(db, ds, min_fights=0, unanimous_only=True)
+    finally:
+        db.close()
+    assert full["unanimous_only"] is False
+    assert unan["unanimous_only"] is True
+    full_ev = {e["event"]: e for e in full["accuracy_by_event"]}["UFC Unanimity"]
+    unan_ev = {e["event"]: e for e in unan["accuracy_by_event"]}["UFC Unanimity"]
+    assert full_ev["n_fights_valid"] == 2   # both fights counted
+    assert unan_ev["n_fights_valid"] == 1   # only the unanimous one
+
+
+def test_summary_rejects_unknown_source(client):
+    r = client.get("/api/dashboard/summary", params={"source": "bogus"})
+    assert r.status_code == 422
+
+
+def test_realworld_source_shape(client):
+    """source=realworld evaluates active models on realworld_df. With an empty
+    test DB (no active models / no fighters) it returns the same shape with
+    source='realworld_df' rather than erroring."""
+    r = client.get("/api/dashboard/summary", params={"source": "realworld"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "realworld_df"
+    for key in ("n_models", "models", "avg_by_model", "consensus_tiers",
+                "probability_tiers", "min_fights", "with_odds", "unanimous_only"):
+        assert key in body, f"missing {key}"
 
 
 def test_event_fights_404_when_unknown(client):

@@ -260,3 +260,16 @@ def test_compute_features_for_fights_orients_repo_format():
     # fighter_1=Bob → Bob's win_pct (0.4) goes to f1_tap_win_pct
     assert abs(df.iloc[0]["f1_tap_win_pct"] - 0.4) < 1e-9
     assert abs(df.iloc[0]["f2_tap_win_pct"] - 0.6) < 1e-9
+
+
+def test_aware_anchor_dates_do_not_raise():
+    """Event.date is tz-aware in the DB, but event_dates are naive throughout
+    the pipeline. compute_fight_features must normalize the anchors so the date
+    comparisons don't raise 'can't compare offset-naive and offset-aware'."""
+    from datetime import timezone
+    args = _minimal_args()
+    aware = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    args["event_date"] = aware
+    args["before_event_date"] = aware  # forces the PIT date-comparison branch
+    row = compute_fight_features(**args)  # must not raise TypeError
+    assert row is not None

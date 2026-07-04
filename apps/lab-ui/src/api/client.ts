@@ -44,6 +44,13 @@ export type RealworldValue = {
   upset_total: number; upset_detected: number; upset_recall: number | null;
   brier_model: number; brier_market: number; brier_delta: number;
   logloss_model: number; logloss_market: number; logloss_delta: number;
+  roi_ev?: number | null; n_picks_ev?: number;
+  roi_ev_sel?: number | null; n_picks_sel?: number;
+  roi_ev_val?: number | null; n_picks_val?: number;
+  roi_dog?: number | null; n_picks_dog?: number;
+  roi_dog_sel?: number | null; n_picks_dog_sel?: number;
+  roi_dog_val?: number | null; n_picks_dog_val?: number;
+  split_date?: string | null;
   buckets: RealworldValueBucket[];
 };
 // Shape of model_version.metrics_json. All optional: older versions may lack
@@ -446,17 +453,204 @@ export interface DashboardSummary {
   recent_fights: DashEventFight[];
   disabled_models: string[];
   min_fights: number;
+  with_odds: boolean;
+  unanimous_only: boolean;
+  source?: DashboardSource | "realworld_df";
   consensus_tiers: Record<string, DashTier>;
   probability_tiers: Record<string, DashTier>;
   special_case_tiers: Record<"dwcs_debut" | "no_history" | "combined", DashTier>;
   special_case_fights: DashSpecialFight[];
 }
+export type DashboardSource = "recalc" | "realworld";
 export interface DashRecalcStatus {
   is_running: boolean;
   step: string | null;
   completed_events: number;
   total_events: number;
 }
+
+// ─── Betting types ───────────────────────────────────
+export interface BettingConfig {
+  min_consensus_pct: number;
+  min_model_prob: number;
+  max_parlay_legs: number;
+  kelly_fraction: number;
+  max_event_exposure_pct: number;
+  max_picks_per_event: number;
+  bankroll: number;
+  stake_per_combo: number;
+  compound_mode?: boolean;
+  bankroll_floor?: number;
+  parlay_stake_pct?: number;
+  min_pit_fights?: number;
+  min_prob_leg_double?: number;
+  min_prob_leg_triple?: number;
+  min_combined_prob_double?: number;
+  min_combined_prob_triple?: number;
+  min_combo_ev?: number;
+  exposure_pct_singles?: number;
+  exposure_pct_doubles?: number;
+  exposure_pct_triples?: number;
+  excluded_picks?: string[];
+}
+
+export interface QualifiedPick {
+  fighter_1: string;
+  fighter_2: string;
+  pick: string;
+  pick_odds_american: number;
+  model_prob: number;
+  decimal_odds: number;
+  implied_prob: number;
+  edge: number;
+  ev_per_unit: number;
+  kelly_full: number;
+  kelly_quarter: number;
+  score: number;
+  consensus_pct: number;
+  excluded: boolean;
+  hit: boolean | null;
+}
+
+export interface BetCombo {
+  type: string;
+  picks: QualifiedPick[];
+  combined_prob: number;
+  combined_odds: number;
+  ev: number;
+  stake: number;
+  potential_return: number;
+  hit: boolean | null;
+}
+
+export interface RecommendSummary {
+  total_stake: number;
+  exposure_pct: number;
+  n_singles: number;
+  n_doubles: number;
+  n_triples: number;
+  expected_return: number;
+}
+
+export interface RecommendResponse {
+  event_name: string;
+  config: BettingConfig;
+  all_qualified_picks: QualifiedPick[];
+  qualified_picks: QualifiedPick[];
+  singles: BetCombo[];
+  doubles: BetCombo[];
+  triples: BetCombo[];
+  summary: RecommendSummary;
+  effective_bankroll?: number | null;
+}
+
+export interface ComboDetail {
+  type: string;
+  pick_names: string[];
+  combined_odds: number;
+  combined_prob: number;
+  ev: number;
+  stake: number;
+  potential_return: number;
+  hit: boolean | null;
+}
+
+export interface EventBacktestDetail {
+  event_name: string;
+  date: string;
+  n_qualified: number;
+  n_bets: number;
+  stake: number;
+  returned: number;
+  profit: number;
+  picks_hit_rate: number;
+  picks: { pick: string; fighter_1?: string; fighter_2?: string; odds: number; prob: number; hit: boolean | null; stake?: number | null }[];
+  combos: ComboDetail[];
+  working_bankroll?: number;
+}
+
+export interface StrategyResult {
+  total_bets: number;
+  total_stake: number;
+  total_return: number;
+  profit: number;
+  roi_pct: number;
+  hit_rate_picks: number;
+  hit_rate_parlays: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  events: EventBacktestDetail[];
+  cumulative_pnl: number[];
+  bankroll_history?: number[];
+}
+
+export interface BacktestResponse {
+  config: BettingConfig;
+  strategies: Record<string, StrategyResult>;
+  total?: StrategyResult | null;
+  best_strategy: string;
+  total_events: number;
+}
+
+export type UserBetStatus = "pending" | "won" | "lost" | "void" | "cashout";
+
+export interface UserBet {
+  id: number;
+  event_id: number;
+  event_name: string | null;
+  session_id: number | null;
+  bet_type: "single" | "double" | "triple";
+  picks: QualifiedPick[];
+  combo_key: string;
+  combined_odds: number;
+  stake: number;
+  potential_return: number;
+  status: UserBetStatus;
+  actual_return: number | null;
+  notes: string | null;
+  engine_snapshot: BetCombo | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface UserBetsBreakdown {
+  bet_type: string;
+  n_bets: number;
+  n_settled: number;
+  stake: number;
+  returned: number;
+  profit: number;
+  roi_pct: number;
+  winrate: number;
+}
+
+export interface UserBetsStats {
+  n_bets: number;
+  n_settled: number;
+  n_won: number;
+  winrate: number;
+  total_stake: number;
+  total_returned: number;
+  net_profit: number;
+  roi_pct: number;
+  by_type: UserBetsBreakdown[];
+  engine_comparison: {
+    engine_stake: number;
+    engine_returned: number;
+    engine_profit: number;
+    engine_roi_pct: number;
+    delta_roi_pct: number;
+  };
+}
+
+export type BetConfig = {
+  id: number;
+  name: string;
+  params: { config: Partial<BettingConfig>; combo: Record<string, number> | null };
+  is_default: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+};
 
 // ─── API ─────────────────────────────────────────────
 export const api = {
@@ -466,8 +660,12 @@ export const api = {
     request<{ models: Record<string, { version_idx: number; feature_set: string; artifact_uri: string; trained_at: string | null } | null> }>(
       "/system/registry"
     ),
-  dashboardSummary: (minFights = 0) =>
-    request<DashboardSummary>(`/dashboard/summary?min_fights=${minFights}`),
+  dashboardSummary: (minFights = 0, withOdds = false, source: DashboardSource = "recalc",
+                     unanimousOnly = false) =>
+    request<DashboardSummary>(
+      `/dashboard/summary?min_fights=${minFights}&with_odds=${withOdds}` +
+      `&source=${source}&unanimous_only=${unanimousOnly}`
+    ),
   dashboardEventFights: (event: string) =>
     request<{ event: string; fights: DashEventFight[] }>(
       `/dashboard/event-fights?event=${encodeURIComponent(event)}`
@@ -595,6 +793,7 @@ export const api = {
       method: "POST", body: JSON.stringify(body),
     }),
   listSessions: () => request<SessionSummary[]>("/predictions/sessions"),
+  listRealworldSessions: () => request<SessionSummary[]>("/predictions/sessions/realworld"),
   getSession: (id: number) => request<SessionDetail>(`/predictions/sessions/${id}`),
   markResult: (id: number, fight_index: number, real_winner: string | null) =>
     request<MarkResultResponse>(`/predictions/sessions/${id}/result`, {
@@ -653,4 +852,39 @@ export const api = {
     step: string | null; error: string | null;
   }>("/recalculation/status"),
   recalcRuns: () => request<Array<{ session_id: number; event_id: number; event_name: string; created_at: string }>>("/recalculation/runs"),
+
+  // betting
+  bettingDefaults: () => request<BettingConfig>("/betting/defaults"),
+  runBacktest: (config: BettingConfig) =>
+    request<BacktestResponse>("/betting/backtest", { method: "POST", body: JSON.stringify(config) }),
+  recommend: (sessionId: number, config: BettingConfig) =>
+    request<RecommendResponse>(`/betting/recommend/${sessionId}`, { method: "POST", body: JSON.stringify(config) }),
+  listBetConfigs: () => request<BetConfig[]>("/betting/configs"),
+  saveBetConfig: (body: { name: string; params: BetConfig["params"]; is_default?: boolean }) =>
+    request<BetConfig>("/betting/configs", { method: "POST", body: JSON.stringify(body) }),
+  deleteBetConfig: (id: number) =>
+    request<{ ok: boolean }>(`/betting/configs/${id}`, { method: "DELETE" }),
+
+  // models combo
+  currentCombo: () => request<Record<string, number>>("/models/current-combo"),
+  applyCombo: (combo: Record<string, number>) =>
+    request<{ applied: unknown[]; skipped: unknown[] }>("/models/apply-combo", { method: "POST", body: JSON.stringify({ combo }) }),
+
+  // user bets
+  listUserBets: (params: { event_id?: number; status?: string; bet_type?: string } = {}) => {
+    const q = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v != null)
+        .map(([k, v]) => [k, String(v)])
+    );
+    return request<UserBet[]>(`/user-bets${q.toString() ? `?${q}` : ""}`);
+  },
+  userBetsStats: (eventId?: number) =>
+    request<UserBetsStats>(`/user-bets/stats${eventId != null ? `?event_id=${eventId}` : ""}`),
+  importUserBets: (body: { event_name: string; combos: BetCombo[]; session_id?: number }) =>
+    request<{ ok: boolean; n_imported: number; bets: UserBet[] }>("/user-bets/import", { method: "POST", body: JSON.stringify(body) }),
+  updateUserBet: (id: number, patch: Partial<UserBet>) =>
+    request<UserBet>(`/user-bets/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteUserBet: (id: number) =>
+    request<{ ok: boolean }>(`/user-bets/${id}`, { method: "DELETE" }),
 };

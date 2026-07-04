@@ -305,6 +305,31 @@ class LabBetConfig(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class LabUserBet(Base):
+    __tablename__ = "lab_user_bet"
+    id = Column(Integer, primary_key=True)
+    event_id = Column(Integer, ForeignKey("event.id", ondelete="CASCADE"),
+                      nullable=False, index=True)
+    session_id = Column(Integer, ForeignKey("prediction_session.id", ondelete="SET NULL"),
+                        nullable=True, index=True)
+    bet_type = Column(String(10), nullable=False)        # single|double|triple
+    picks = Column(JSONB, nullable=False)
+    combo_key = Column(Text, nullable=False)             # "<type>:pick1+pick2+..."
+    combined_odds = Column(Float, nullable=False)
+    stake = Column(Float, nullable=False)
+    potential_return = Column(Float, nullable=False)
+    status = Column(String(12), nullable=False, default="pending")  # pending|won|lost|void|cashout
+    actual_return = Column(Float, nullable=True)
+    notes = Column(Text, nullable=True)
+    engine_snapshot = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC),
+                        onupdate=lambda: datetime.now(UTC))
+    __table_args__ = (
+        UniqueConstraint("event_id", "combo_key", name="uq_lab_user_bet_event_combo"),
+    )
+
+
 # ─── Experimentacion (solo lab) ───────────────────────
 class HpSearchStudy(Base):
     __tablename__ = "hp_search_study"

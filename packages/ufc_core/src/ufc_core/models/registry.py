@@ -116,6 +116,7 @@ class ModelRegistry:
                 "metrics_json": r.metrics_json,
                 "hp_json": r.hp_json,
                 "artifact_uri": r.artifact_uri,
+                "trained_at": r.trained_at.isoformat() if r.trained_at else None,
                 "starred": r.starred,
                 "was_production": r.was_production,
                 "note": r.note,

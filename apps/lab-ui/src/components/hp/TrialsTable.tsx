@@ -8,21 +8,43 @@ interface TrialsTableProps {
   onToggle?: (idx: number) => void;
 }
 
-const MINIMIZE = new Set(["mean_logloss", "mean_brier", "mean_overfit", "prod_brier"]);
+type Metrics = NonNullable<HpTrial["metrics"]>;
 
-const METRIC_COLS: { key: keyof NonNullable<HpTrial["metrics"]>; label: string; pct: boolean }[] = [
-  { key: "mean_accuracy", label: "Acc (CV)", pct: true },
-  { key: "mean_train_accuracy", label: "Train Acc", pct: true },
-  { key: "prod_accuracy", label: "Prod Acc", pct: true },
-  { key: "realworld_accuracy", label: "RW (todos)", pct: true },
-  { key: "realworld_mf_accuracy", label: "RW (min_fights)", pct: true },
-  { key: "mean_logloss", label: "LogLoss", pct: false },
-  { key: "mean_brier", label: "Brier", pct: false },
-  { key: "mean_overfit", label: "Overfit", pct: false },
-  { key: "mean_auc", label: "AUC", pct: true },
-  { key: "tossup_acc_col" as never, label: "Toss-up", pct: true },
-  { key: "upset_pr_col" as never, label: "Upset P/R", pct: false },
-  { key: "brier_delta_col" as never, label: "ΔBrier", pct: false },
+// Each column carries its own sort accessor + default direction, so every
+// column is sortable by construction. (The old code kept a separate if-chain
+// in the sort that only covered the ROI columns, leaving Toss-up / Upset P/R /
+// ΔBrier — which also live under realworld_value — silently unsortable.)
+type MetricCol = {
+  key: string;
+  label: string;
+  pct: boolean;
+  sortVal: (t: HpTrial) => number | null | undefined;
+  minimize?: boolean; // lower is better → default to ascending
+};
+
+const metric = (k: keyof Metrics) => (t: HpTrial) => t.metrics?.[k] as number | null | undefined;
+const rwVal = (f: (rv: NonNullable<HpTrial["metrics"]>["realworld_value"]) => number | null | undefined) =>
+  (t: HpTrial) => f(t.metrics?.realworld_value);
+
+const METRIC_COLS: MetricCol[] = [
+  { key: "mean_accuracy", label: "Acc (CV)", pct: true, sortVal: metric("mean_accuracy") },
+  { key: "mean_train_accuracy", label: "Train Acc", pct: true, sortVal: metric("mean_train_accuracy") },
+  { key: "prod_accuracy", label: "Prod Acc", pct: true, sortVal: metric("prod_accuracy") },
+  { key: "realworld_accuracy", label: "RW (todos)", pct: true, sortVal: metric("realworld_accuracy") },
+  { key: "realworld_mf_accuracy", label: "RW (min_fights)", pct: true, sortVal: metric("realworld_mf_accuracy") },
+  { key: "mean_logloss", label: "LogLoss", pct: false, sortVal: metric("mean_logloss"), minimize: true },
+  { key: "mean_brier", label: "Brier", pct: false, sortVal: metric("mean_brier"), minimize: true },
+  { key: "mean_overfit", label: "Overfit", pct: false, sortVal: metric("mean_overfit"), minimize: true },
+  { key: "mean_auc", label: "AUC", pct: true, sortVal: metric("mean_auc") },
+  { key: "tossup_acc_col", label: "Toss-up", pct: true, sortVal: rwVal((rv) => rv?.tossup_accuracy) },
+  { key: "upset_pr_col", label: "Upset P/R", pct: false, sortVal: rwVal((rv) => rv?.upset_precision) },
+  { key: "brier_delta_col", label: "ΔBrier", pct: false, sortVal: rwVal((rv) => rv?.brier_delta), minimize: true },
+  { key: "roi_all_col", label: "ROI EV+", pct: false, sortVal: rwVal((rv) => rv?.roi_ev) },
+  { key: "roi_sel_col", label: "EV+ sel", pct: false, sortVal: rwVal((rv) => rv?.roi_ev_sel) },
+  { key: "roi_val_col", label: "EV+ val", pct: false, sortVal: rwVal((rv) => rv?.roi_ev_val) },
+  { key: "roi_dog_all_col", label: "ROI dog", pct: false, sortVal: rwVal((rv) => rv?.roi_dog) },
+  { key: "roi_dog_sel_col", label: "dog sel", pct: false, sortVal: rwVal((rv) => rv?.roi_dog_sel) },
+  { key: "roi_dog_val_col", label: "dog val", pct: false, sortVal: rwVal((rv) => rv?.roi_dog_val) },
 ];
 
 function fmt(v: number | null | undefined, pct: boolean): string {
@@ -38,6 +60,7 @@ function fmtParams(params: Record<string, number | string>): string {
 
 export function TrialsTable({ trials, selectable = false, selected, onToggle }: TrialsTableProps) {
   const [sortKey, setSortKey] = useState<string>("mean_accuracy");
+  const [sortAsc, setSortAsc] = useState<boolean>(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   function toggleExpand(idx: number) {
@@ -49,10 +72,25 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
     });
   }
 
-  const sortAsc = MINIMIZE.has(sortKey);
+  // Click a new column → sort by its default direction (ascending for
+  // lower-is-better metrics). Click the active column again → flip direction.
+  function handleSort(col: MetricCol) {
+    if (col.key === sortKey) {
+      setSortAsc((prev) => !prev);
+    } else {
+      setSortKey(col.key);
+      setSortAsc(!!col.minimize);
+    }
+  }
+
+  const sortCol = METRIC_COLS.find((c) => c.key === sortKey) ?? METRIC_COLS[0];
   const sorted = [...trials].sort((a, b) => {
-    const va = (a.metrics?.[sortKey as keyof NonNullable<HpTrial["metrics"]>] as number) ?? (sortAsc ? Infinity : -Infinity);
-    const vb = (b.metrics?.[sortKey as keyof NonNullable<HpTrial["metrics"]>] as number) ?? (sortAsc ? Infinity : -Infinity);
+    // Nulls/undefined always sink to the bottom regardless of direction.
+    const va = sortCol.sortVal(a);
+    const vb = sortCol.sortVal(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
     return sortAsc ? va - vb : vb - va;
   });
   const colSpan = (selectable ? 1 : 0) + 2 + METRIC_COLS.length;
@@ -71,7 +109,7 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
               <th
                 key={c.key}
                 className="text-right py-1.5 px-2 cursor-pointer select-none hover:text-foreground transition-colors whitespace-nowrap"
-                onClick={() => setSortKey(c.key)}
+                onClick={() => handleSort(c)}
               >
                 <span className={sortKey === c.key ? "text-accent font-bold" : ""}>{c.label}</span>
                 {sortKey === c.key && <span className="ml-0.5 text-[10px]">{sortAsc ? "▲" : "▼"}</span>}
@@ -80,7 +118,7 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
           </tr>
         </thead>
         <tbody>
-          {sorted.slice(0, 60).map((t) => {
+          {sorted.slice(0, 200).map((t) => {
             const folds = t.metrics?.fold_accuracies ?? [];
             const rvBuckets = t.metrics?.realworld_value?.buckets ?? [];
             const canExpand = folds.length > 0 || rvBuckets.length > 0;
@@ -120,7 +158,7 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                   </td>
                   {METRIC_COLS.map((c) => {
                     const rv = t.metrics?.realworld_value;
-                    if (c.key === ("tossup_acc_col" as never)) {
+                    if (c.key === "tossup_acc_col") {
                       return (
                         <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
                           {rv ? fmt(rv.tossup_accuracy, true) : "—"}
@@ -130,14 +168,14 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                         </td>
                       );
                     }
-                    if (c.key === ("upset_pr_col" as never)) {
+                    if (c.key === "upset_pr_col") {
                       return (
                         <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
                           {rv ? `${fmt(rv.upset_precision, true)} / ${fmt(rv.upset_recall, true)}` : "—"}
                         </td>
                       );
                     }
-                    if (c.key === ("brier_delta_col" as never)) {
+                    if (c.key === "brier_delta_col") {
                       return (
                         <td
                           key={c.key}
@@ -147,6 +185,104 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                           ].join(" ")}
                         >
                           {rv ? `${rv.brier_delta >= 0 ? "+" : ""}${rv.brier_delta.toFixed(4)}` : "—"}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_all_col") {
+                      const r = rv?.roi_ev;
+                      const np = rv?.n_picks_ev ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_sel_col") {
+                      const r = rv?.roi_ev_sel;
+                      const np = rv?.n_picks_sel ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_val_col") {
+                      const r = rv?.roi_ev_val;
+                      const np = rv?.n_picks_val ?? 0;
+                      const small = np > 0 && np < 40;
+                      const title = [
+                        `n=${np}`,
+                        rv?.split_date ? `corte ${rv.split_date}` : null,
+                        small ? "muestra pequeña" : null,
+                      ].filter(Boolean).join(" · ");
+                      return (
+                        <td
+                          key={c.key}
+                          title={title}
+                          className={[
+                            "py-1.5 px-2 text-right whitespace-nowrap display-num font-medium",
+                            r != null ? (r > 0 ? "text-success" : r < 0 ? "text-destructive" : "") : "",
+                          ].join(" ")}
+                        >
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_dog_all_col") {
+                      const r = rv?.roi_dog;
+                      const np = rv?.n_picks_dog ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_dog_sel_col") {
+                      const r = rv?.roi_dog_sel;
+                      const np = rv?.n_picks_dog_sel ?? 0;
+                      return (
+                        <td key={c.key} className="py-1.5 px-2 text-right whitespace-nowrap display-num">
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
+                        </td>
+                      );
+                    }
+                    if (c.key === "roi_dog_val_col") {
+                      const r = rv?.roi_dog_val;
+                      const np = rv?.n_picks_dog_val ?? 0;
+                      const small = np > 0 && np < 40;
+                      const title = [
+                        `n=${np}`,
+                        rv?.split_date ? `corte ${rv.split_date}` : null,
+                        small ? "muestra pequeña" : null,
+                      ].filter(Boolean).join(" · ");
+                      return (
+                        <td
+                          key={c.key}
+                          title={title}
+                          className={[
+                            "py-1.5 px-2 text-right whitespace-nowrap display-num font-medium",
+                            r != null ? (r > 0 ? "text-success" : r < 0 ? "text-destructive" : "") : "",
+                          ].join(" ")}
+                        >
+                          {r != null ? `${r >= 0 ? "+" : ""}${(r * 100).toFixed(1)}%` : "—"}
+                          {np > 0 && (
+                            <span className="ml-1 text-[10px] text-muted-foreground">({np})</span>
+                          )}
                         </td>
                       );
                     }
@@ -174,7 +310,7 @@ export function TrialsTable({ trials, selectable = false, selected, onToggle }: 
                           c.key === "mean_train_accuracy" ? "text-muted-foreground" : "",
                         ].join(" ")}
                       >
-                        {fmt(t.metrics?.[c.key] as number | null, c.pct)}
+                        {fmt(c.sortVal(t) as number | null, c.pct)}
                       </td>
                     );
                   })}

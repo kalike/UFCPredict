@@ -240,6 +240,7 @@ def start_hp_search(req: dict, study_id: int) -> dict:
             _augment_35f, _build_dataset, _preprocess_split, evaluate_realworld,
             recalculate_elo,
         )
+        from ufc_core.trainer.value_metrics import json_sanitize as _json_safe
         from ufc_core.imputer import FeatureImputer
         from lab_api.services.training import (
             _build_realworld_df, _load_realworld_odds, _resolve_feat_type,
@@ -469,9 +470,11 @@ def start_hp_search(req: dict, study_id: int) -> dict:
                 db.add(db_models.HpSearchTrial(
                     study_id=study_id,
                     trial_idx=trial.number,
-                    params=params,
+                    params=_json_safe(params),
                     value=means.get(prim_metric),
-                    metrics=metrics,
+                    # JSONB can't hold NaN/Inf — strip any before persisting so a
+                    # single odd trial can't abort the whole search.
+                    metrics=_json_safe(metrics),
                     status="completed",
                 ))
                 db.commit()

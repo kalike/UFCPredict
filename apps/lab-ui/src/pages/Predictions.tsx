@@ -4,15 +4,17 @@ import { FightInputForm } from "../components/predictions/FightInputForm";
 import { PredictionResults } from "../components/predictions/PredictionResults";
 import { PastEventsTab } from "../components/predictions/PastEventsTab";
 import { SessionsTab } from "../components/predictions/SessionsTab";
+import { RealworldSessionsTab } from "../components/predictions/RealworldSessionsTab";
 import { usePredictFights } from "../components/predictions/usePredictions";
 import type { FightInput } from "../api/client";
 
-type Tab = "new" | "past" | "sessions";
+type Tab = "new" | "past" | "sessions" | "realworld";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "new", label: "Nueva predicción" },
   { key: "past", label: "Eventos pasados" },
   { key: "sessions", label: "Sesiones" },
+  { key: "realworld", label: "RealWorld" },
 ];
 
 export default function PredictionsPage() {
@@ -61,6 +63,7 @@ export default function PredictionsPage() {
 
       {tab === "past" && <PastEventsTab />}
       {tab === "sessions" && <SessionsTab />}
+      {tab === "realworld" && <RealworldSessionsTab />}
     </div>
   );
 }

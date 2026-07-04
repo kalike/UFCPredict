@@ -22,6 +22,7 @@ from ufc_core.models.registry import ModelRegistry
 from ufc_core.tapology.picks_repo import (
     load_db_picks_lookup, orient_picks_for_fight,
 )
+from ufc_core.trainer.value_metrics import json_sanitize
 
 
 logger = logging.getLogger("lab-api.training")
@@ -574,7 +575,9 @@ def _train_one_job(db, ts, job: dict, df, realworld_df) -> dict:
                  # delta_win_streak uses the odd clip_sym_6 override for 35f.
                  "delta_overrides": (feat_type == "35f"),
                  **({"hp_params": hp_params} if hp_params else {})},
-        metrics_json=metrics, artifact_uri=f"file://{artifact_path}",
+        # JSONB rejects NaN/Inf — strip any (e.g. from value-vs-market metrics
+        # on fights without odds) before persisting.
+        metrics_json=json_sanitize(metrics), artifact_uri=f"file://{artifact_path}",
         note=f"Trained by lab-api ({origin}): {label}",
     )
     v = (

@@ -100,7 +100,10 @@ def status() -> HpRunStatus:
 
 
 @router.get("/studies", response_model=list[HpStudySummary])
-def list_studies(limit: int = 50, db: Session = Depends(get_db)) -> list[HpStudySummary]:
+def list_studies(limit: int = 200, db: Session = Depends(get_db)) -> list[HpStudySummary]:
+    # Summary rows only (trials load lazily per study), so a high cap is cheap.
+    # 200 leaves comfortable headroom for large batches (e.g. 32+ searches) plus
+    # existing history without dropping the oldest jobs off the results table.
     rows = (
         db.query(db_models.HpSearchStudy)
           .order_by(db_models.HpSearchStudy.started_at.desc())
