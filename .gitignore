@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Node
+node_modules/
+apps/lab-ui/dist/
+
+# Entorno
+.env
+.env.local
+
+# Datos y modelos locales
+*.parquet
+*.ckpt
+*.joblib
+catboost_info/
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
