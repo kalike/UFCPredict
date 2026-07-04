@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../../api/client";
+import { api, type DashboardSource } from "../../api/client";
 
-export function useDashboard(minFights = 0, withOdds = false) {
+export function useDashboard(minFights = 0, withOdds = false,
+                             source: DashboardSource = "recalc", unanimousOnly = false) {
   return useQuery({
-    queryKey: ["dashboard", "summary", minFights, withOdds],
-    queryFn: () => api.dashboardSummary(minFights, withOdds),
+    queryKey: ["dashboard", "summary", minFights, withOdds, source, unanimousOnly],
+    queryFn: () => api.dashboardSummary(minFights, withOdds, source, unanimousOnly),
     staleTime: 5 * 60 * 1000,
   });
 }

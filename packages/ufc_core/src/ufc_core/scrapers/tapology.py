@@ -17,10 +17,17 @@ from ufc_core.schemas.tapology import (
     TapologyMethodBreakdown,
     TapologyScrapeResponse,
 )
+from ufc_core.tapology.event_resolver import (
+    TapologyBlockedError,
+    _fetch_html,
+)
 
 logger = logging.getLogger("ufc-predictor.tapology")
 
 _SEM_MAX = 4  # max concurrent matchup-page fetches
+# Chromium is reliably flagged by Cloudflare; webkit passes the challenge and
+# firefox is a fallback. Tried in order until the event page loads unblocked.
+_ENGINES = ("webkit", "firefox")
 
 
 class TapologyScraper:
@@ -31,24 +38,45 @@ class TapologyScraper:
         errors: list[str] = []
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/125.0.0.0 Safari/537.36"
-                ),
-            )
+            # 1. Fetch event page, falling back across engines if blocked.
+            #    Tapology sits behind Cloudflare: _fetch_html waits for the
+            #    challenge to resolve and raises if the page never unblocks.
+            browser = None
+            context = None
+            event_html = ""
+            for engine in _ENGINES:
+                browser = await getattr(pw, engine).launch(headless=True)
+                context = await browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    locale="en-US",
+                )
+                try:
+                    event_html = await _fetch_html(context, event_url)
+                    break
+                except TapologyBlockedError:
+                    logger.warning(
+                        "Tapology event page blocked by Cloudflare (%s): %s",
+                        engine, event_url,
+                    )
+                    errors.append(f"Cloudflare blocked the event page with {engine}")
+                    await browser.close()
+                    browser = None
 
-            # 1. Fetch event page
-            page = await context.new_page()
-            await page.goto(event_url, wait_until="domcontentloaded", timeout=30_000)
-            event_html = await page.content()
-            await page.close()
+            if browser is None:
+                return TapologyScrapeResponse(
+                    event_name="",
+                    n_fights=0,
+                    fights=[],
+                    errors=errors,
+                )
 
             event_name, matchup_urls = self._parse_event_page(event_html)
 
             if not matchup_urls:
+                logger.warning(
+                    "No matchup URLs found on event page (size=%d, name=%r): %s",
+                    len(event_html), event_name, event_url,
+                )
                 await browser.close()
                 return TapologyScrapeResponse(
                     event_name=event_name,
@@ -64,11 +92,13 @@ class TapologyScraper:
             async def _fetch_matchup(idx: int, url: str) -> None:
                 async with sem:
                     try:
-                        p = await context.new_page()
-                        await p.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                        html = await p.content()
-                        await p.close()
+                        html = await _fetch_html(context, url)
                         fights[idx] = self._parse_matchup_page(html, url)
+                    except TapologyBlockedError:
+                        logger.warning(
+                            "Tapology matchup blocked by Cloudflare: %s", url
+                        )
+                        errors.append(f"Matchup {url}: cloudflare_blocked")
                     except Exception as exc:
                         logger.warning("Failed to scrape matchup %s: %s", url, exc)
                         errors.append(f"Matchup {url}: {exc}")

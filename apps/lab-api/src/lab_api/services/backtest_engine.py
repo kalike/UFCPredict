@@ -116,6 +116,8 @@ def _backtest_over_sessions(
                     picks=[
                         {
                             "pick": p.pick,
+                            "fighter_1": p.fighter_1,
+                            "fighter_2": p.fighter_2,
                             "odds": p.decimal_odds,
                             "prob": p.model_prob,
                             "hit": p.hit,

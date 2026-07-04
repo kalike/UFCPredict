@@ -454,11 +454,14 @@ export interface DashboardSummary {
   disabled_models: string[];
   min_fights: number;
   with_odds: boolean;
+  unanimous_only: boolean;
+  source?: DashboardSource | "realworld_df";
   consensus_tiers: Record<string, DashTier>;
   probability_tiers: Record<string, DashTier>;
   special_case_tiers: Record<"dwcs_debut" | "no_history" | "combined", DashTier>;
   special_case_fights: DashSpecialFight[];
 }
+export type DashboardSource = "recalc" | "realworld";
 export interface DashRecalcStatus {
   is_running: boolean;
   step: string | null;
@@ -561,7 +564,7 @@ export interface EventBacktestDetail {
   returned: number;
   profit: number;
   picks_hit_rate: number;
-  picks: { pick: string; odds: number; prob: number; hit: boolean | null; stake?: number | null }[];
+  picks: { pick: string; fighter_1?: string; fighter_2?: string; odds: number; prob: number; hit: boolean | null; stake?: number | null }[];
   combos: ComboDetail[];
   working_bankroll?: number;
 }
@@ -657,9 +660,11 @@ export const api = {
     request<{ models: Record<string, { version_idx: number; feature_set: string; artifact_uri: string; trained_at: string | null } | null> }>(
       "/system/registry"
     ),
-  dashboardSummary: (minFights = 0, withOdds = false) =>
+  dashboardSummary: (minFights = 0, withOdds = false, source: DashboardSource = "recalc",
+                     unanimousOnly = false) =>
     request<DashboardSummary>(
-      `/dashboard/summary?min_fights=${minFights}&with_odds=${withOdds}`
+      `/dashboard/summary?min_fights=${minFights}&with_odds=${withOdds}` +
+      `&source=${source}&unanimous_only=${unanimousOnly}`
     ),
   dashboardEventFights: (event: string) =>
     request<{ event: string; fights: DashEventFight[] }>(
