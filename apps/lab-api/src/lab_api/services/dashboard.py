@@ -176,7 +176,8 @@ def _models_present(db, session_ids: list[int]) -> list[str]:
     return ordered + extra
 
 
-def build_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
+def build_summary(db, ds, min_fights: int = 0, with_odds: bool = False,
+                  unanimous_only: bool = False) -> dict:
     from ufc_core.db import models as m
 
     # "Universo apostable": cuando with_odds, restringimos la agregación a las
@@ -246,6 +247,10 @@ def build_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
             if has_consensus:
                 votes = [(_predicted_winner(pf, f1n, f2n), pf) for pf in probs.values()]
                 predicted, n_for, n_total, cons_prob = _consensus(votes, f1n, f2n)
+            # Solo consenso unánime: descarta peleas donde los modelos no coinciden
+            # todos en el mismo ganador (el universo de la estrategia de apuestas).
+            if unanimous_only and has_consensus and n_for != n_total:
+                continue
             if real:
                 is_past = True
                 if (ev_dt is not None
@@ -357,6 +362,8 @@ def build_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
         "disabled_models": [],
         "min_fights": min_fights,
         "with_odds": with_odds,
+        "unanimous_only": unanimous_only,
+        "source": "recalc",
         "consensus_tiers": {k: _finalize_tier(v) for k, v in cons_tiers.items()},
         "probability_tiers": {k: _finalize_tier(v) for k, v in prob_tiers.items()},
         "special_case_tiers": {k: _finalize_tier(v) for k, v in spec_tiers.items()},
@@ -411,12 +418,13 @@ def invalidate() -> None:
         _cache.clear()
 
 
-def get_summary(db, ds, min_fights: int = 0, with_odds: bool = False) -> dict:
-    key = (min_fights, with_odds)
+def get_summary(db, ds, min_fights: int = 0, with_odds: bool = False,
+                unanimous_only: bool = False) -> dict:
+    key = (min_fights, with_odds, unanimous_only)
     with _cache_lock:
         if key in _cache:
             return _cache[key]
-    data = build_summary(db, ds, min_fights, with_odds=with_odds)
+    data = build_summary(db, ds, min_fights, with_odds=with_odds, unanimous_only=unanimous_only)
     with _cache_lock:
         _cache[key] = data
     return data

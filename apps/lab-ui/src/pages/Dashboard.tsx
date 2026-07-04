@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { PageHeader, Button, Input, Skeleton } from "../components/ui";
+import type { DashboardSource } from "../api/client";
 import {
   useDashboard, useInvalidateDashboard, useRecalculationStatus,
 } from "../components/dashboard/useDashboard";
@@ -25,7 +26,15 @@ export default function Dashboard() {
   // ambos lados (las que de verdad apostarías). Filtro de agregación, no
   // re-evalúa modelos.
   const [withOdds, setWithOdds] = useState(false);
-  const { data, isLoading, isError, error, refetch } = useDashboard(minFights, withOdds);
+  // Fuente de evaluación: "recalc" agrega las predicciones cacheadas por carta;
+  // "realworld" re-evalúa los modelos activos sobre el holdout realworld_df con
+  // TTA (coincide con el realworld_accuracy de cada versión).
+  const [source, setSource] = useState<DashboardSource>("recalc");
+  // Solo consenso unánime: restringe TODOS los KPIs a peleas donde los modelos
+  // coinciden todos en el ganador (el universo de la estrategia de apuestas).
+  const [unanimousOnly, setUnanimousOnly] = useState(false);
+  const { data, isLoading, isError, error, refetch } =
+    useDashboard(minFights, withOdds, source, unanimousOnly);
   const invalidate = useInvalidateDashboard();
   const [selectedEvent, setSelectedEvent] = useState<string | null>(null);
   const [specialTier, setSpecialTier] = useState<string | null>(null);
@@ -62,11 +71,27 @@ export default function Dashboard() {
       <Input type="number" value={minFights}
              onChange={(e) => setMinFights(Math.max(0, Number(e.target.value)))}
              className="w-20" />
+      <label className="text-xs text-muted-foreground"
+             title="Cartas: agrega las predicciones cacheadas del recálculo. RealWorld holdout: re-evalúa los modelos activos sobre realworld_df con TTA (≈ realworld_accuracy de cada versión).">
+        Fuente
+      </label>
+      <select value={source}
+              onChange={(e) => setSource(e.target.value as DashboardSource)}
+              className="h-9 rounded-md border border-border bg-card px-2 text-xs">
+        <option value="recalc">Cartas (recalc)</option>
+        <option value="realworld">RealWorld holdout</option>
+      </select>
       <label className="flex items-center gap-2 text-xs text-muted-foreground"
              title="Restringe los KPIs a peleas con odds en ambos lados (universo apostable)">
         <input type="checkbox" checked={withOdds}
                onChange={(e) => setWithOdds(e.target.checked)} />
         Solo peleas con odds
+      </label>
+      <label className="flex items-center gap-2 text-xs text-muted-foreground"
+             title="Restringe TODOS los KPIs a peleas donde los modelos coinciden todos en el ganador (consenso unánime)">
+        <input type="checkbox" checked={unanimousOnly}
+               onChange={(e) => setUnanimousOnly(e.target.checked)} />
+        Solo consenso unánime
       </label>
       <Button variant="primary" disabled={recalcActive || invalidate.isPending}
               onClick={startRecalc}>

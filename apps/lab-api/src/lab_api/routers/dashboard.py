@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from lab_api.deps import get_data_store, get_db
 from lab_api.services import dashboard as dsvc
+from lab_api.services import dashboard_realworld as rwsvc
 from lab_api.services import recalculation as recalc_svc
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -14,10 +15,18 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 def summary(
     min_fights: int = Query(0, ge=0),
     with_odds: bool = Query(False),
+    unanimous_only: bool = Query(False),
+    source: str = Query("recalc", pattern="^(recalc|realworld)$"),
     db: Session = Depends(get_db),
 ) -> dict:
     ds = get_data_store()
-    return dsvc.get_summary(db, ds, min_fights=min_fights, with_odds=with_odds)
+    if source == "realworld":
+        # Evaluate the active models on the held-out realworld_df directly
+        # (rebuild dataset + TTA), matching a version's realworld_accuracy.
+        return rwsvc.get_realworld_summary(db, ds, min_fights=min_fights,
+                                           with_odds=with_odds, unanimous_only=unanimous_only)
+    return dsvc.get_summary(db, ds, min_fights=min_fights, with_odds=with_odds,
+                            unanimous_only=unanimous_only)
 
 
 @router.get("/event-fights")
@@ -44,6 +53,7 @@ def invalidate_cache(
     min_fights: int = Query(0, ge=0),
 ) -> dict:
     dsvc.invalidate()
+    rwsvc.invalidate()
     if recalculate and not recalc_svc.get_status()["is_running"]:
         res = recalc_svc.start_recalculation(None)
         return {
