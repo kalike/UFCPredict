@@ -220,3 +220,74 @@ def test_existing_road_to_ufc_source_corrected(test_engine, db_session):
     }])
     ev = db_session.query(models.Event).filter_by(name="Road to UFC 4.3").one()
     assert ev.source == "road_to_ufc"
+
+
+def test_promoted_placeholder_fight_backfilled_by_scrape(test_engine, db_session):
+    """Reproduces the Fiziev bug: an event promoted before it happened has
+    placeholder fights (result=NULL, source='promoted'). When the scrape later
+    brings the real results, ingest must backfill the result (oriented to the
+    stored fighter_1), flip source promoted->scraped, and count fights_updated —
+    instead of skipping the existing fight."""
+    Base.metadata.create_all(test_engine)
+    # Two real fighters + a promoted event with ONE placeholder fight (no result).
+    a = models.Fighter(name="Rafael Fiziev", slug="rafael-fiziev",
+                        ufcstats_url="http://ufcstats.com/fighter-details/fiziev")
+    b = models.Fighter(name="Manuel Torres", slug="manuel-torres",
+                        ufcstats_url="http://ufcstats.com/fighter-details/torres")
+    db_session.add_all([a, b]); db_session.flush()
+    ev = models.Event(name="UFC Fight Night: Fiziev vs. Torres",
+                      date=None, status="completed", source="promoted")
+    db_session.add(ev); db_session.flush()
+    # Placeholder stored with Torres as fighter_1 (opposite of the scraped owner).
+    db_session.add(models.Fight(event_id=ev.id, fighter_1_id=b.id,
+                                fighter_2_id=a.id, result=None))
+    db_session.commit()
+
+    # Scrape brings Fiziev's page: he WON. Owner perspective = 'win'.
+    counts = ingest_fighters_payload(db_session, [{
+        "name": "Rafael Fiziev",
+        "url": "http://ufcstats.com/fighter-details/fiziev",
+        "fights": [{
+            "event": "UFC Fight Night: Fiziev vs. Torres",
+            "event_date": "2026-06-27", "opponent": "Manuel Torres",
+            "opponent_url": "http://ufcstats.com/fighter-details/torres",
+            "result": "win", "method": "KO/TKO", "round": 2, "time": "3:11",
+            "weight_class": "Lightweight",
+        }],
+    }])
+
+    db_session.refresh(ev)
+    assert ev.source == "scraped"                 # promoted -> scraped
+    assert db_session.query(models.Fight).count() == 1   # no duplicate row
+    f = db_session.query(models.Fight).one()
+    # Stored fighter_1 is Torres, so his oriented result is 'loss' (Fiziev won).
+    assert f.fighter_1_id == b.id
+    assert f.result == "loss"
+    assert f.method == "KO/TKO" and f.weight_class == "Lightweight"
+    assert counts["fights_updated"] == 1
+    assert counts["fights_new"] == 0
+
+
+def test_backfill_never_overwrites_existing_result(test_engine, db_session):
+    """A fight that already carries a result must not be rewritten by a later
+    scrape (backfill is fill-only)."""
+    Base.metadata.create_all(test_engine)
+    a = models.Fighter(name="AA", slug="aa", ufcstats_url="http://ufcstats.com/fighter-details/aa")
+    b = models.Fighter(name="BB", slug="bb", ufcstats_url="http://ufcstats.com/fighter-details/bb")
+    db_session.add_all([a, b]); db_session.flush()
+    ev = models.Event(name="UFC Settled", date=None, status="completed", source="scraped")
+    db_session.add(ev); db_session.flush()
+    db_session.add(models.Fight(event_id=ev.id, fighter_1_id=a.id, fighter_2_id=b.id,
+                                result="win", method="U-DEC"))
+    db_session.commit()
+    counts = ingest_fighters_payload(db_session, [{
+        "name": "AA", "url": "http://ufcstats.com/fighter-details/aa",
+        "fights": [{
+            "event": "UFC Settled", "event_date": "2026-06-27", "opponent": "BB",
+            "opponent_url": "http://ufcstats.com/fighter-details/bb",
+            "result": "loss", "method": "KO", "round": 1, "time": "1:00",
+        }],
+    }])
+    f = db_session.query(models.Fight).one()
+    assert f.result == "win" and f.method == "U-DEC"   # untouched
+    assert counts["fights_updated"] == 0

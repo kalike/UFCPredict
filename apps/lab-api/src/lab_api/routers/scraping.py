@@ -130,6 +130,35 @@ class StatusResponse(BaseModel):
     error: str | None = None
 
 
+def _refresh_and_recalc_after_scrape(event_count: int) -> None:
+    """Make freshly scraped events show up everywhere without a manual step.
+
+    A scrape writes new events/results to the DB, but the API serves the
+    dashboards from a cached DataStore singleton and cached summaries, and the
+    default dashboard reads ``lab_recalc`` PredictionSession rows that only the
+    recalculation creates. So after an ingest we:
+
+      1. Drop the cached DataStore singleton, so the dashboards (which read it
+         via ``Depends(get_data_store)``) rebuild fighters_raw/event_dates with
+         the new data.
+      2. Invalidate the aggregated + realworld_df dashboard caches.
+      3. Kick off a RealWorld-window recalculation so ``lab_recalc`` sessions
+         exist for the new events (skipped if one is already running).
+
+    Best-effort: callers wrap this so a failure never breaks the scrape.
+    """
+    from lab_api.deps import get_data_store
+    from lab_api.services import dashboard as dsvc
+    from lab_api.services import dashboard_realworld as rwsvc
+    from lab_api.services import recalculation as recalc_svc
+
+    get_data_store.cache_clear()
+    dsvc.invalidate()
+    rwsvc.invalidate()
+    if not recalc_svc.get_status()["is_running"]:
+        recalc_svc.start_recalculation(None)
+
+
 @router.post("/start", response_model=StartResponse)
 def start_scrape(letters: str | None = None) -> StartResponse:
     """Launch an async UFCStats incremental scrape + DB ingest.
@@ -398,6 +427,19 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                     recent_event_names=sorted(event_names) if event_names else None,
                 )
                 db.add(run); db.commit()
+
+                # ── 6. Refresh caches + kick off RealWorld recalc ──────
+                # New events are invisible in the dashboard until the cached
+                # DataStore/summaries are dropped and a recalc creates their
+                # lab_recalc sessions. Best-effort: never fail the scrape here.
+                if event_names:
+                    try:
+                        _set(step="refreshing caches + recalculating RealWorld")
+                        _refresh_and_recalc_after_scrape(len(event_names))
+                        _log("[OK] caches refreshed + RealWorld recalc triggered")
+                    except Exception as rc_exc:
+                        logger.exception("post-scrape refresh/recalc failed (non-fatal)")
+                        _log(f"[WARN] post-scrape refresh/recalc failed (non-fatal): {rc_exc!r}")
 
                 _log(
                     f"[OK] done · scraped={len(all_payload)} · events={len(event_names)} "
