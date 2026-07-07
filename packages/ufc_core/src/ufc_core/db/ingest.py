@@ -134,12 +134,14 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
     """Upsert raw fighter dicts into fighter/event/fight tables.
 
     Returns:
-        dict with counters: fighters_new, fighters_updated, events_new, fights_new.
+        dict with counters: fighters_new, fighters_updated, events_new,
+        fights_new, fights_updated.
     """
     fighters_new = 0
     fighters_updated = 0
     events_new = 0
     fights_new = 0
+    fights_updated = 0
 
     # Bootstrap caches from the DB so repeat calls are fully idempotent.
     fighter_by_url: dict[str, models.Fighter] = {
@@ -248,6 +250,12 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                 # this was wired (never downgrade a promoted event).
                 if ev_source == "road_to_ufc" and event.source != "road_to_ufc":
                     event.source = "road_to_ufc"
+                # A promoted (pre-fight) card that now shows up in a fighter's
+                # scraped history has actually happened, so promote it to a real
+                # scraped event. UFCStats only lists completed fights in a
+                # history, so its presence here means results are available.
+                elif ev_source == "scraped" and event.source == "promoted":
+                    event.source = "scraped"
                 # Backfill a missing date once a payload carries it (rows created
                 # before event_date was read correctly have date=NULL).
                 if event.date is None and ev_date is not None:
@@ -301,6 +309,28 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                   .first()
             )
             if existing_fight is not None:
+                # Backfill a placeholder fight (created by the promote flow with
+                # result=NULL) once the scrape brings the real outcome. Never
+                # overwrite an already-populated field — the scraped history is
+                # the source of truth only for what was missing.
+                res = fight.get("result")
+                if res and not existing_fight.result:
+                    # `res` is the owner (`fighter`) perspective; orient it to the
+                    # stored fighter_1 in case the placeholder was inserted with
+                    # the opposite fighter order.
+                    if existing_fight.fighter_1_id == fighter.id:
+                        existing_fight.result = res
+                    else:
+                        existing_fight.result = {"win": "loss", "loss": "win"}.get(res, res)
+                    fights_updated += 1
+                if not existing_fight.method and fight.get("method"):
+                    existing_fight.method = fight.get("method")
+                if not existing_fight.round and fight.get("round"):
+                    existing_fight.round = fight.get("round")
+                if not existing_fight.time and fight.get("time"):
+                    existing_fight.time = fight.get("time")
+                if not existing_fight.weight_class and fight.get("weight_class"):
+                    existing_fight.weight_class = fight.get("weight_class")
                 continue
 
             db.add(models.Fight(
@@ -321,4 +351,5 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
         "fighters_updated": fighters_updated,
         "events_new": events_new,
         "fights_new": fights_new,
+        "fights_updated": fights_updated,
     }
