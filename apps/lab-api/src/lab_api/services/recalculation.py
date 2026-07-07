@@ -128,6 +128,17 @@ def start_recalculation(event_ids: list[int] | None) -> dict:
                 finally:
                     sub_db.close()
 
+            # The new lab_recalc sessions changed what the dashboard shows —
+            # drop the cached summaries so the next request rebuilds with them.
+            try:
+                from lab_api.services import dashboard as _dsvc
+                from lab_api.services import dashboard_realworld as _rwsvc
+                _dsvc.invalidate()
+                _rwsvc.invalidate()
+            except Exception:
+                logger.warning("dashboard cache invalidation after recalc failed",
+                               exc_info=True)
+
             with _lock:
                 _state.update({
                     "is_running": False,
