@@ -199,6 +199,18 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 }
                 all_payload: list[dict] = []
                 summary_dict: dict = {}
+
+                # Crash-recovery dump: every scraped fighter is appended here
+                # the moment its letter finishes, BEFORE ingest. If an ingest
+                # fails, the payload survives on disk and /reingest can replay
+                # it without touching the network. Deleted on full success.
+                import json as _json
+                from ufc_core.config import SCRAPE_DUMPS_DIR
+                SCRAPE_DUMPS_DIR.mkdir(parents=True, exist_ok=True)
+                dump_path = (
+                    SCRAPE_DUMPS_DIR
+                    / f"ufcstats_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.jsonl"
+                )
                 # Two-level parallelism:
                 #   - LETTER_WORKERS letters in parallel
                 #   - inside each letter, FIGHTER_WORKERS fighter pages in parallel
@@ -227,6 +239,15 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 done_letters = 0
                 all_failures: list[dict] = []  # [{name, url, error}]
+                # Per-letter ingest: each letter commits on its own, so a
+                # failure in one letter never rolls back the others (nor
+                # forces a full re-scrape — the incremental index will skip
+                # whatever was committed). Totals accumulate across letters.
+                counts = {
+                    "fighters_new": 0, "fighters_updated": 0,
+                    "events_new": 0, "fights_new": 0, "fights_updated": 0,
+                }
+                ingest_failed_letters: list[str] = []
                 with ThreadPoolExecutor(max_workers=LETTER_WORKERS) as letter_pool:
                     futures = {
                         letter_pool.submit(
@@ -258,6 +279,34 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                                 f"+{len(new_f)} new, +{len(updated_f)} updated, "
                                 f"{len(fails)} failed"
                             )
+
+                            letter_payload = new_f + updated_f
+                            if not letter_payload:
+                                continue
+
+                            # 1. Persist the raw payload BEFORE ingesting it.
+                            with open(dump_path, "a", encoding="utf-8") as fh:
+                                for fighter_dict in letter_payload:
+                                    fh.write(
+                                        _json.dumps(fighter_dict, ensure_ascii=False,
+                                                    default=str) + "\n"
+                                    )
+
+                            # 2. Ingest this letter in its own transaction.
+                            try:
+                                letter_counts = ingest_fighters_payload(db, letter_payload)
+                                for k in counts:
+                                    counts[k] += letter_counts.get(k, 0)
+                                _log(
+                                    f"[OK] ingest '{letter}': "
+                                    f"+{letter_counts['fighters_new']} new, "
+                                    f"+{letter_counts['fighters_updated']} updated"
+                                )
+                            except Exception as ing_exc:
+                                db.rollback()
+                                ingest_failed_letters.append(letter)
+                                logger.exception("ingest for letter %s failed", letter)
+                                _log(f"[ERROR] ingest '{letter}' failed: {ing_exc!r}")
                         except Exception as e:
                             logger.exception("letter %s failed: %s", letter, e)
                             all_failures.append({"name": f"<letter:{letter}>", "url": "", "error": str(e)})
@@ -265,13 +314,27 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                             _set(progress_current=done_letters, step=f"letter '{letter}' failed: {e!r}")
                             _log(f"[ERROR] letter '{letter}' failed: {e!r}")
 
-                _set(phase="ingest", step=f"ingesting {len(all_payload)} fighters")
-                _log(f"[INFO] ingesting {len(all_payload)} fighters into DB")
-                counts = ingest_fighters_payload(db, all_payload)
+                _set(
+                    phase="ingest",
+                    step=(
+                        f"ingest done: +{counts['fighters_new']} new, "
+                        f"+{counts['fighters_updated']} updated"
+                    ),
+                )
                 _log(
                     f"[OK] ingest done: +{counts['fighters_new']} new, "
                     f"+{counts['fighters_updated']} updated"
                 )
+                if ingest_failed_letters:
+                    _log(
+                        f"[WARN] ingest failed for letters "
+                        f"{','.join(sorted(ingest_failed_letters))} — raw payload kept at "
+                        f"{dump_path}; fix the cause and POST /api/scraping/reingest"
+                    )
+                elif dump_path.exists():
+                    # Everything ingested and committed: the crash-recovery
+                    # dump has served its purpose.
+                    dump_path.unlink()
 
                 # ── 2. Compute event names touched ─────────────────────
                 # Tapology hook receives a list of event names that may need
@@ -463,13 +526,26 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                             "fight_features_upserted": feat_count,
                             "photos_downloaded": (photo_summary or {}).get("ok", 0),
                             "failed_count": len(all_failures),
+                            "ingest_failed_letters": sorted(ingest_failed_letters),
                         },
+                        "error": (
+                            f"ingest failed for letters "
+                            f"{','.join(sorted(ingest_failed_letters))} — payload kept at "
+                            f"{dump_path}; POST /api/scraping/reingest to replay"
+                            if ingest_failed_letters else None
+                        ),
                     })
             finally:
                 db.close()
         except Exception as e:
             logger.exception("scrape job failed")
             _log(f"[ERROR] scrape job failed: {e!r}")
+            dp = locals().get("dump_path")
+            if dp is not None and dp.exists():
+                _log(
+                    f"[INFO] raw scraped payload kept at {dp} — "
+                    f"POST /api/scraping/reingest to replay it without re-scraping"
+                )
             with _lock:
                 _state.update({
                     "is_running": False,
@@ -486,6 +562,129 @@ def status() -> StatusResponse:
     with _lock:
         snap = dict(_state)
     return StatusResponse(**snap)
+
+
+@router.post("/reingest", response_model=StartResponse)
+def start_reingest(path: str | None = None) -> StartResponse:
+    """Replay a raw scrape dump into the DB without touching the network.
+
+    Every scrape run appends its scraped fighters to a .jsonl dump under
+    SCRAPE_DUMPS_DIR before ingesting them, and deletes it on full success.
+    If an ingest failed, this endpoint re-ingests the surviving dump — the
+    newest one by default, or the one named by `path` (a filename inside
+    SCRAPE_DUMPS_DIR). Ingest is idempotent, so fighters that already made it
+    into the DB are simply updated. The dump is deleted once fully replayed.
+    """
+    from pathlib import Path
+
+    from ufc_core.config import SCRAPE_DUMPS_DIR
+
+    if path:
+        # Restrict to files inside the dumps dir: `path` is a filename, not a
+        # free-form filesystem path.
+        dump = (SCRAPE_DUMPS_DIR / Path(path).name).resolve()
+    else:
+        dumps = (
+            sorted(SCRAPE_DUMPS_DIR.glob("*.jsonl"))
+            if SCRAPE_DUMPS_DIR.exists() else []
+        )
+        dump = dumps[-1] if dumps else None
+    if dump is None or not dump.is_file():
+        raise HTTPException(404, "No scrape dump found to reingest")
+
+    with _lock:
+        if _state["is_running"]:
+            raise HTTPException(409, "A scrape is already running")
+        _state.update({
+            "is_running": True,
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None, "step": f"reingesting {dump.name}",
+            "phase": "ingest", "progress_current": 0, "progress_total": 0,
+            "log_lines": [], "counts": None, "error": None,
+        })
+
+    def _job():
+        import json as _json
+        from ufc_core.db.engine import SessionLocal
+        from ufc_core.db.ingest import ingest_fighters_payload
+
+        try:
+            payload: list[dict] = []
+            with open(dump, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        payload.append(_json.loads(line))
+
+            _set(progress_total=len(payload))
+            _log(f"[INFO] reingesting {len(payload)} fighters from {dump}")
+
+            counts = {
+                "fighters_new": 0, "fighters_updated": 0,
+                "events_new": 0, "fights_new": 0, "fights_updated": 0,
+            }
+            # Batches bound the transaction size; each ingest call commits, so
+            # the incremental progress survives a mid-run failure.
+            BATCH = 500
+            db: Session = SessionLocal()
+            try:
+                for i in range(0, len(payload), BATCH):
+                    batch_counts = ingest_fighters_payload(db, payload[i:i + BATCH])
+                    for k in counts:
+                        counts[k] += batch_counts.get(k, 0)
+                    done = min(i + BATCH, len(payload))
+                    _set(progress_current=done,
+                         step=f"reingested {done}/{len(payload)} fighters")
+                    _log(f"[OK] reingested {done}/{len(payload)}")
+
+                run = db_models.ScrapingRun(
+                    source="reingest",
+                    finished_at=datetime.now(UTC),
+                    new_count=counts["fighters_new"],
+                    updated_count=counts["fighters_updated"],
+                    error_msg=None,
+                )
+                db.add(run); db.commit()
+            finally:
+                db.close()
+
+            dump.unlink(missing_ok=True)
+
+            try:
+                _set(step="refreshing caches + recalculating RealWorld")
+                _refresh_and_recalc_after_scrape(0)
+                _log("[OK] caches refreshed + RealWorld recalc triggered")
+            except Exception as rc_exc:
+                logger.exception("post-reingest refresh/recalc failed (non-fatal)")
+                _log(f"[WARN] post-reingest refresh failed (non-fatal): {rc_exc!r}")
+
+            _log(
+                f"[OK] reingest done: +{counts['fighters_new']} new, "
+                f"+{counts['fighters_updated']} updated"
+            )
+            with _lock:
+                _state.update({
+                    "is_running": False,
+                    "phase": "done",
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "step": (
+                        f"reingest done: +{counts['fighters_new']} new, "
+                        f"+{counts['fighters_updated']} updated"
+                    ),
+                    "counts": counts,
+                })
+        except Exception as e:
+            logger.exception("reingest job failed")
+            _log(f"[ERROR] reingest job failed: {e!r} — dump kept at {dump}")
+            with _lock:
+                _state.update({
+                    "is_running": False,
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "step": "failed", "error": repr(e),
+                })
+
+    threading.Thread(target=_job, daemon=True).start()
+    return StartResponse(started=True, message=f"Reingest of {dump.name} kicked off")
 
 
 @router.post("/photos", response_model=StartResponse)

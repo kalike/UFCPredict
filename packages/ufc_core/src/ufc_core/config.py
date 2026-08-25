@@ -24,6 +24,11 @@ ELO_RATINGS_PATH = DATA_DIR / "elo_ratings.json"
 # Fighter headshots downloaded by scrapers/fotos.py ({Name_With_Underscores}.png)
 FOTOS_DIR = DATA_DIR / "fotos"
 
+# Raw scraped-fighter payload dumps (.jsonl, one fighter per line). Written as
+# each letter finishes so a failed ingest never costs a re-scrape; consumed by
+# lab-api's /api/scraping/reingest and deleted once fully ingested.
+SCRAPE_DUMPS_DIR = DATA_DIR / "scrape_dumps"
+
 # Datetime parsed versions for comparisons
 REALWORLD_CUTOFF_DT = datetime.strptime(REALWORLD_CUTOFF_DATE, "%Y-%m-%d")
 TEST_CUTOFF_DT = datetime.strptime(TEST_CUTOFF_DATE, "%Y-%m-%d")

@@ -291,3 +291,32 @@ def test_backfill_never_overwrites_existing_result(test_engine, db_session):
     f = db_session.query(models.Fight).one()
     assert f.result == "win" and f.method == "U-DEC"   # untouched
     assert counts["fights_updated"] == 0
+
+
+def test_same_fight_from_both_histories_single_batch(test_engine, db_session):
+    """Both fighters of one bout appear in the SAME payload, each listing the
+    fight from their own perspective. With autoflush=False the DB-side dedup
+    query cannot see the pending insert, so the in-session pair guard must
+    prevent the second insert (regression: uq_fight_event_pair violation on a
+    from-scratch full scrape)."""
+    Base.metadata.create_all(test_engine)
+    counts = ingest_fighters_payload(db_session, [
+        {
+            "name": "AA", "url": "http://ufcstats.com/fighter-details/aa",
+            "fights": [{
+                "event": "UFC Fresh", "event_date": "2026-05-02", "opponent": "BB",
+                "opponent_url": "http://ufcstats.com/fighter-details/bb",
+                "result": "win", "method": "KO", "round": 1, "time": "2:22",
+            }],
+        },
+        {
+            "name": "BB", "url": "http://ufcstats.com/fighter-details/bb",
+            "fights": [{
+                "event": "UFC Fresh", "event_date": "2026-05-02", "opponent": "AA",
+                "opponent_url": "http://ufcstats.com/fighter-details/aa",
+                "result": "loss", "method": "KO", "round": 1, "time": "2:22",
+            }],
+        },
+    ])
+    assert db_session.query(models.Fight).count() == 1
+    assert counts["fights_new"] == 1

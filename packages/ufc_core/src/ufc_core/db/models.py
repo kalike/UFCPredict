@@ -49,11 +49,11 @@ class Fight(Base):
     event_id = Column(Integer, ForeignKey("event.id", ondelete="CASCADE"), nullable=False, index=True)
     fighter_1_id = Column(Integer, ForeignKey("fighter.id"), nullable=False)
     fighter_2_id = Column(Integer, ForeignKey("fighter.id"), nullable=False)
-    weight_class = Column(String(50), nullable=True)
+    weight_class = Column(String(255), nullable=True)
     card_position = Column(String(20), nullable=True)   # main|co_main|prelim|early_prelim
     scheduled_rounds = Column(Integer, nullable=True)
     result = Column(String(20), nullable=True)
-    method = Column(String(50), nullable=True)
+    method = Column(String(255), nullable=True)
     round = Column(Integer, nullable=True)
     time = Column(String(10), nullable=True)
     odds_f1_american = Column(Integer, nullable=True)

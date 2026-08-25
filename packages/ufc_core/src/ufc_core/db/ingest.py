@@ -157,6 +157,11 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
     # All slugs currently in use, kept in sync as we create/rename fighters so
     # _unique_slug never collides with the UNIQUE(slug) constraint.
     slugs_taken: set[str] = {f.slug for f in fighter_by_url.values()}
+    # Order-insensitive (event, pair) keys of fights added in THIS session but
+    # not yet flushed. The session runs with autoflush=False, so the DB query
+    # below cannot see pending rows: without this set, the same fight seen from
+    # both fighters' histories inserts twice and violates uq_fight_event_pair.
+    pairs_added: set[tuple[int, int, int]] = set()
 
     for item in payload:
         url = item["url"]
@@ -297,6 +302,10 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                 fighters_new += 1
 
             # Idempotent fight check: same event + same pair (order-insensitive).
+            f_lo, f_hi = sorted((fighter.id, opp.id))
+            pair_key = (event.id, f_lo, f_hi)
+            if pair_key in pairs_added:
+                continue
             existing_fight = (
                 db.query(models.Fight)
                   .filter_by(event_id=event.id, fighter_1_id=fighter.id,
@@ -343,6 +352,7 @@ def ingest_fighters_payload(db: Session, payload: Iterable[dict]) -> dict[str, i
                 round=fight.get("round"),
                 time=fight.get("time"),
             ))
+            pairs_added.add(pair_key)
             fights_new += 1
 
     db.commit()
