@@ -102,7 +102,7 @@ def test_tapology_hook_runs_when_scrape_finds_nothing_new(
 
     hook_calls: list = []
 
-    async def fake_hook(event_names=None):
+    async def fake_hook(event_names=None, progress_cb=None):
         hook_calls.append(event_names)
         return {"events_resolved": 0, "picks_inserted": 0}
 
@@ -122,6 +122,54 @@ def test_tapology_hook_runs_when_scrape_finds_nothing_new(
     assert not running
     assert scraping._state["error"] is None
     assert hook_calls, "tapology hook must run even with no new fighters"
+
+
+def test_tapology_progress_reaches_monitor(client, monkeypatch, tmp_path):
+    """Per-event progress reported by the tapology hook must land in the
+    monitor state the frontend polls (step/progress bar/log console), and the
+    closing summary line must use the hook's real summary keys."""
+    import time
+
+    import ufc_core.config as cfg
+    import ufc_core.scrapers.ufcstats as ufcstats
+    import ufc_core.tapology as tap
+    from lab_api.routers import scraping
+
+    monkeypatch.setattr(cfg, "SCRAPE_DUMPS_DIR", tmp_path / "dumps")
+    monkeypatch.setattr(
+        ufcstats, "process_letter_incremental", lambda *a, **k: ([], [], {}, [])
+    )
+
+    async def fake_hook(event_names=None, progress_cb=None):
+        progress_cb(1, 3, "event 'UFC Wired Night': 4 picks inserted (5 matchups)")
+        return {
+            "events_resolved": 1, "picks_inserted": 4, "unresolved": 0,
+            "skipped_recent": 2, "event_failures": 0, "pending": 1,
+        }
+
+    monkeypatch.setattr(tap, "tapology_hook_for_event_names", fake_hook)
+    monkeypatch.setattr(scraping, "_refresh_and_recalc_after_scrape",
+                        lambda n: None)
+
+    r = client.post("/api/scraping/start", params={"letters": "a"})
+    assert r.status_code == 200
+
+    for _ in range(100):
+        with scraping._lock:
+            running = scraping._state["is_running"]
+        if not running:
+            break
+        time.sleep(0.1)
+    assert not running
+    assert scraping._state["error"] is None
+
+    logs = "\n".join(scraping._state["log_lines"])
+    assert "UFC Wired Night" in logs
+    assert "tapology 1/3" in logs
+    # Progress bar values survive in state (frontend shows current/total).
+    assert scraping._state["progress_total"] == 3
+    # Closing summary reflects what the hook actually did.
+    assert "resolved=1" in logs and "picks=4" in logs
 
 
 # ── Reingest from a surviving scrape dump ───────────────────────────────

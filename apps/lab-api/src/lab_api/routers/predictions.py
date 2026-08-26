@@ -4,7 +4,9 @@ Supports listing events, reading caches, and running real ensemble inference
 against all active models for a given event.
 """
 
+import asyncio
 from datetime import datetime, UTC
+
 import numpy as np
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -1251,6 +1253,19 @@ def promote_session(
     )
 
 
+async def _scrape_tapology_off_loop(url: str):
+    """Run the Playwright scrape on a worker thread with its own event loop.
+
+    Under `uvicorn --reload` on Windows the server loop is a SelectorEventLoop,
+    which cannot spawn the browser subprocess (NotImplementedError); a fresh
+    loop created in a worker thread uses the default Proactor policy there.
+    """
+    from ufc_core.scrapers.tapology import TapologyScraper
+    return await asyncio.to_thread(
+        asyncio.run, TapologyScraper().scrape_event(url)
+    )
+
+
 @router.post("/sessions/{session_id}/import-odds", response_model=ImportOddsResponse)
 async def import_odds(
     session_id: int, req: ImportOddsRequest, db: Session = Depends(get_db),
@@ -1262,9 +1277,8 @@ async def import_odds(
     if s is None:
         raise HTTPException(404, "Session not found")
 
-    from ufc_core.scrapers.tapology import TapologyScraper
     try:
-        scraped = await TapologyScraper().scrape_event(req.tapology_url)
+        scraped = await _scrape_tapology_off_loop(req.tapology_url)
     except Exception as e:  # noqa: BLE001
         return ImportOddsResponse(ok=False, error=f"Scraping failed: {e!r}")
 
@@ -1320,9 +1334,8 @@ async def tapology_scrape(req: TapologyScrapeIn) -> dict:
     """Scrape a Tapology event page into ``{event_name, n_fights, fights[]}``."""
     if "tapology.com" not in (req.url or ""):
         raise HTTPException(400, "URL must be a Tapology event page")
-    from ufc_core.scrapers.tapology import TapologyScraper
     try:
-        scraped = await TapologyScraper().scrape_event(req.url)
+        scraped = await _scrape_tapology_off_loop(req.url)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Scraping failed: {e!r}")
     return scraped.model_dump()

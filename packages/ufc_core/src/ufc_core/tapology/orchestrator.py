@@ -5,6 +5,8 @@ scrapperUFCStats.py) can import without creating cycles.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -27,6 +29,8 @@ from ufc_core.tapology.paths import (
 )
 from ufc_core.tapology.picks_repo import PickRow, TapologyPicksRepo
 from ufc_core.tapology.unmatched import RetryQueue, UnmatchedLogger
+
+logger = logging.getLogger("ufc-predictor.tapology")
 
 
 def _lazy_scraper():
@@ -179,8 +183,15 @@ async def process_matchup_dto(
     return True, "ok"
 
 
-async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> dict[str, int]:
+async def tapology_hook_for_event_names(
+    event_names: set[str] | None = None,
+    progress_cb: Callable[[int, int, str], None] | None = None,
+) -> dict[str, int]:
     """Resolve + scrape + persist Tapology picks for recent events.
+
+    ``progress_cb(done, total, message)`` is invoked as the pending-event
+    queue advances so callers can surface live progress (the lab-api
+    scraping monitor). Callback errors are logged and ignored.
 
     Selects candidate events directly from the DB (date >= today - 90 days,
     fights present), independent of which fighters the JSON scrape touched.
@@ -211,6 +222,14 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
     # NOTE: event_names is intentionally unused; kept in signature so existing
     # callers (api/scraping.py, scripts/) work without modification.
     del event_names
+
+    def _report(done: int, total: int, msg: str) -> None:
+        logger.info("tapology %d/%d: %s", done, total, msg)
+        if progress_cb is not None:
+            try:
+                progress_cb(done, total, msg)
+            except Exception:
+                logger.exception("progress_cb failed (ignored)")
 
     unmatched = UnmatchedLogger(
         fighters_path=unmatched_fighters_path(),
@@ -246,6 +265,7 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
                     .all()
                 )
                 if not event_rows:
+                    _report(0, 0, "no recent events in DB")
                     return summary
 
                 # Incremental skip: filter out events whose every fight already
@@ -276,26 +296,51 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
                 summary["candidates"] = len(event_rows)
                 summary["pending"] = len(pending_events)
                 if not pending_events:
+                    _report(
+                        0, 0,
+                        f"no events pending picks "
+                        f"({skipped_recent} already up to date)",
+                    )
                     return summary
+
+                _report(
+                    0, len(pending_events),
+                    f"{len(pending_events)} events pending picks "
+                    f"({skipped_recent} already up to date)",
+                )
 
                 fighter_m, fight_m, _ = build_matchers(
                     session, restrict_event_ids={r.id for r in pending_events}
                 )
 
                 event_failures = 0
-                for eid, name, dt in pending_events:
+                total = len(pending_events)
+                for idx, (eid, name, dt) in enumerate(pending_events, start=1):
                     # Per-event try/except so a single Cloudflare block or
                     # parser error doesn't kill the rest of the queue. The
                     # original behaviour was to bubble up and abort everything.
                     try:
                         ev_date = dt.date() if hasattr(dt, "date") else dt
+                        _report(
+                            idx - 1, total,
+                            f"event '{name}' ({idx}/{total}): resolving Tapology URL",
+                        )
                         event_url = await resolve_event_url(context, name, ev_date)
                         if event_url is None:
                             unmatched.add_event(name, str(ev_date), url="")
                             summary["unresolved"] += 1
+                            _report(
+                                idx, total,
+                                f"event '{name}': not found on Tapology",
+                            )
                             continue
                         summary["events_resolved"] += 1
+                        _report(
+                            idx - 1, total,
+                            f"event '{name}' ({idx}/{total}): scraping matchups",
+                        )
                         _, dtos = await scraper.scrape_event_matchups(context, event_url)
+                        ev_picks = 0
                         for dto in dtos:
                             ok, _ = await process_matchup_dto(
                                 dto,
@@ -310,13 +355,23 @@ async def tapology_hook_for_event_names(event_names: set[str] | None = None) -> 
                                 force=False,
                             )
                             if ok:
-                                summary["picks_inserted"] += 1
+                                ev_picks += 1
+                        summary["picks_inserted"] += ev_picks
+                        _report(
+                            idx, total,
+                            f"event '{name}': {ev_picks} picks inserted "
+                            f"({len(dtos)} matchups)",
+                        )
                     except Exception as ev_exc:
                         event_failures += 1
                         retry_q.add(
                             matchup_url="",
                             reason=f"event_error: {type(ev_exc).__name__}: {ev_exc}",
                             context={"event_name": name, "event_date": str(ev_date) if ev_date else ""},
+                        )
+                        _report(
+                            idx, total,
+                            f"event '{name}' failed: {type(ev_exc).__name__}: {ev_exc}",
                         )
 
                 summary["event_failures"] = event_failures

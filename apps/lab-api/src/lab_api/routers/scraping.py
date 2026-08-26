@@ -359,11 +359,26 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                 try:
                     import asyncio
                     from ufc_core.tapology import tapology_hook_for_event_names
+
+                    def _tap_progress(done: int, total: int, msg: str) -> None:
+                        _set(progress_current=done, progress_total=total,
+                             step=f"tapology {done}/{total}: {msg}")
+                        _log(f"[INFO] tapology {done}/{total}: {msg}")
+
                     tap_summary = asyncio.run(
-                        tapology_hook_for_event_names(event_names)
+                        tapology_hook_for_event_names(
+                            event_names, progress_cb=_tap_progress
+                        )
                     )
                     logger.info("tapology hook summary: %s", tap_summary)
-                    _log(f"[OK] tapology: {(tap_summary or {}).get('matched', 0)} matched")
+                    _log(
+                        f"[OK] tapology: "
+                        f"resolved={tap_summary.get('events_resolved', 0)} "
+                        f"picks={tap_summary.get('picks_inserted', 0)} "
+                        f"unresolved={tap_summary.get('unresolved', 0)} "
+                        f"skipped={tap_summary.get('skipped_recent', 0)} "
+                        f"failures={tap_summary.get('event_failures', 0)}"
+                    )
                 except Exception as tap_exc:
                     logger.exception("tapology hook failed (non-fatal)")
                     tap_summary = {"error": repr(tap_exc)}
@@ -510,7 +525,7 @@ def start_scrape(letters: str | None = None) -> StartResponse:
 
                 _log(
                     f"[OK] done · scraped={len(all_payload)} · events={len(event_names)} "
-                    f"· tap={(tap_summary or {}).get('matched', 0)} · feats={feat_count} "
+                    f"· tap={(tap_summary or {}).get('picks_inserted', 0)} · feats={feat_count} "
                     f"· photos={(photo_summary or {}).get('ok', 0)} · failed={len(all_failures)}"
                 )
                 with _lock:
@@ -520,7 +535,7 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                         "finished_at": datetime.now(UTC).isoformat(),
                         "step": (
                             f"done · scraped={len(all_payload)} · events={len(event_names)} "
-                            f"· tap={(tap_summary or {}).get('matched', 0)} "
+                            f"· tap={(tap_summary or {}).get('picks_inserted', 0)} "
                             f"· feats={feat_count} · photos={(photo_summary or {}).get('ok', 0)} "
                             f"· failed={len(all_failures)}"
                         ),

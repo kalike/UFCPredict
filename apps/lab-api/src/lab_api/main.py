@@ -1,5 +1,6 @@
 """Lab API — FastAPI entry point, port 8101."""
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -15,6 +16,19 @@ from lab_api.routers import (
 
 # Prevent OpenMP segfault when PyTorch and LightGBM both load libomp on macOS
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+
+# Uvicorn only configures its own loggers; without this, app/scraper INFO
+# traces (scraping progress, tapology hook) never reach the console — only
+# WARNING+ via Python's last-resort handler.
+_console = logging.StreamHandler()
+_console.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+)
+for _name in ("lab-api", "ufc-predictor", "ufc-trainer", "ufc-bias"):
+    _app_logger = logging.getLogger(_name)
+    _app_logger.setLevel(logging.INFO)
+    if not _app_logger.handlers:
+        _app_logger.addHandler(_console)
 
 
 @asynccontextmanager
