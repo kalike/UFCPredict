@@ -78,6 +78,52 @@ def test_refresh_and_recalc_skips_recalc_when_running(monkeypatch):
     assert not any(isinstance(c, tuple) for c in calls)  # recalc NOT started
 
 
+# ── Tapology hook on empty incremental runs ─────────────────────────────
+
+
+def test_tapology_hook_runs_when_scrape_finds_nothing_new(
+    client, monkeypatch, tmp_path
+):
+    """The Tapology hook selects pending events from the DB itself, so it must
+    run even when the incremental scrape ingests no new/updated fighters —
+    otherwise events ingested while the hook was broken never get picks."""
+    import time
+
+    import ufc_core.config as cfg
+    import ufc_core.scrapers.ufcstats as ufcstats
+    import ufc_core.tapology as tap
+    from lab_api.routers import scraping
+
+    monkeypatch.setattr(cfg, "SCRAPE_DUMPS_DIR", tmp_path / "dumps")
+    # Incremental scrape returns nothing new, without touching the network.
+    monkeypatch.setattr(
+        ufcstats, "process_letter_incremental", lambda *a, **k: ([], [], {}, [])
+    )
+
+    hook_calls: list = []
+
+    async def fake_hook(event_names=None):
+        hook_calls.append(event_names)
+        return {"events_resolved": 0, "picks_inserted": 0}
+
+    monkeypatch.setattr(tap, "tapology_hook_for_event_names", fake_hook)
+    monkeypatch.setattr(scraping, "_refresh_and_recalc_after_scrape",
+                        lambda n: None)
+
+    r = client.post("/api/scraping/start", params={"letters": "a"})
+    assert r.status_code == 200
+
+    for _ in range(100):
+        with scraping._lock:
+            running = scraping._state["is_running"]
+        if not running:
+            break
+        time.sleep(0.1)
+    assert not running
+    assert scraping._state["error"] is None
+    assert hook_calls, "tapology hook must run even with no new fighters"
+
+
 # ── Reingest from a surviving scrape dump ───────────────────────────────
 
 

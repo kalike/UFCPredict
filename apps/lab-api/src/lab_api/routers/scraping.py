@@ -337,9 +337,9 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                     dump_path.unlink()
 
                 # ── 2. Compute event names touched ─────────────────────
-                # Tapology hook receives a list of event names that may need
-                # community picks. We collect every event referenced by the
-                # newly ingested fighters' fight histories.
+                # Events referenced by the newly ingested fighters' fight
+                # histories. Used to scope feature materialization (step 4)
+                # and the post-scrape recalc (step 6).
                 event_names: set[str] = set()
                 for fighter in all_payload:
                     for fight in fighter.get("fights", []):
@@ -348,22 +348,26 @@ def start_scrape(letters: str | None = None) -> StartResponse:
                             event_names.add(ev)
 
                 # ── 3. Tapology hook (best-effort) ─────────────────────
+                # Always runs, even when this pass ingested nothing new: the
+                # hook selects pending events from the DB itself (last 90 days
+                # without recent picks), so gating it on event_names would
+                # leave events from earlier runs without picks forever if the
+                # hook failed back then (e.g. Playwright browsers missing).
                 tap_summary: dict | None = None
-                if event_names:
-                    _set(phase="tapology", step=f"tapology hook for {len(event_names)} events")
-                    _log(f"[INFO] tapology hook for {len(event_names)} events")
-                    try:
-                        import asyncio
-                        from ufc_core.tapology import tapology_hook_for_event_names
-                        tap_summary = asyncio.run(
-                            tapology_hook_for_event_names(event_names)
-                        )
-                        logger.info("tapology hook summary: %s", tap_summary)
-                        _log(f"[OK] tapology: {(tap_summary or {}).get('matched', 0)} matched")
-                    except Exception as tap_exc:
-                        logger.exception("tapology hook failed (non-fatal)")
-                        tap_summary = {"error": repr(tap_exc)}
-                        _log(f"[WARN] tapology hook failed (non-fatal): {tap_exc!r}")
+                _set(phase="tapology", step="tapology hook (events pending picks)")
+                _log("[INFO] tapology hook: checking DB for events pending picks")
+                try:
+                    import asyncio
+                    from ufc_core.tapology import tapology_hook_for_event_names
+                    tap_summary = asyncio.run(
+                        tapology_hook_for_event_names(event_names)
+                    )
+                    logger.info("tapology hook summary: %s", tap_summary)
+                    _log(f"[OK] tapology: {(tap_summary or {}).get('matched', 0)} matched")
+                except Exception as tap_exc:
+                    logger.exception("tapology hook failed (non-fatal)")
+                    tap_summary = {"error": repr(tap_exc)}
+                    _log(f"[WARN] tapology hook failed (non-fatal): {tap_exc!r}")
 
                 # ── 4. Materialize fight_features (v7) ─────────────────
                 # Iterate only over events we just touched. For each, compute
