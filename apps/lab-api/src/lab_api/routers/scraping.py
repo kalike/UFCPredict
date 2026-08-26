@@ -349,10 +349,12 @@ def start_scrape(letters: str | None = None) -> StartResponse:
 
                 # ── 3. Tapology hook (best-effort) ─────────────────────
                 # Always runs, even when this pass ingested nothing new: the
-                # hook selects pending events from the DB itself (last 90 days
-                # without recent picks), so gating it on event_names would
-                # leave events from earlier runs without picks forever if the
-                # hook failed back then (e.g. Playwright browsers missing).
+                # hook selects pending events from the DB itself (the whole
+                # RealWorld window without final picks), so gating it on
+                # event_names would leave events from earlier runs without
+                # picks forever if the hook failed back then (e.g. Playwright
+                # browsers missing). This also makes an initial load backfill
+                # picks+odds for every RealWorld event automatically.
                 tap_summary: dict | None = None
                 _set(phase="tapology", step="tapology hook (events pending picks)")
                 _log("[INFO] tapology hook: checking DB for events pending picks")

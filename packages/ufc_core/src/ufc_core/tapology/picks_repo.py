@@ -54,6 +54,25 @@ class TapologyPicksRepo:
         self._session.add(new_row)
         return True
 
+    def all_scraped_after(self, fight_ids: set[int], cutoff: datetime) -> bool:
+        """True if every fight_id has a row scraped at/after ``cutoff``.
+
+        Used for completed events: picks scraped after the event date are the
+        final snapshot and never need re-scraping, regardless of age.
+        """
+        if not fight_ids:
+            return True
+        rows = (
+            self._session.query(TapologyPicks.fight_id, TapologyPicks.scraped_at)
+            .filter(TapologyPicks.fight_id.in_(fight_ids))
+            .all()
+        )
+        final_ids = {
+            r.fight_id for r in rows
+            if r.scraped_at is not None and r.scraped_at >= cutoff
+        }
+        return final_ids == fight_ids
+
     def all_recent(self, fight_ids: set[int]) -> bool:
         """True if every fight_id has a row with scraped_at < RECENCY_DAYS."""
         if not fight_ids:

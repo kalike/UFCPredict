@@ -193,8 +193,9 @@ async def tapology_hook_for_event_names(
     queue advances so callers can surface live progress (the lab-api
     scraping monitor). Callback errors are logged and ignored.
 
-    Selects candidate events directly from the DB (date >= today - 90 days,
-    fights present), independent of which fighters the JSON scrape touched.
+    Selects candidate events directly from the DB (date >= the RealWorld
+    cutoff, or today - 90 days if that is earlier; fights present),
+    independent of which fighters the JSON scrape touched.
     Reason: a fighter whose record didn't change won't appear in
     ``new + updated``, so events from a previous JSON snapshot that were
     only just ingested into the DB would be invisible to the hook.
@@ -248,13 +249,21 @@ async def tapology_hook_for_event_names(
         context = await browser.new_context()
         try:
             with SyncSessionLocal() as session:
-                # Source of truth: events recent enough to plausibly need picks.
+                # Source of truth: every event that can still need picks. The
+                # window covers the whole RealWorld held-out span so an initial
+                # load backfills picks+odds for all of it, with the trailing
+                # 90 days as lower bound should the cutoff ever move closer.
                 from datetime import date as _date, timedelta as _timedelta
 
-                date_floor = _date.today() - _timedelta(days=90)
+                from ufc_core.config import REALWORLD_CUTOFF_DT
+
+                date_floor = min(
+                    REALWORLD_CUTOFF_DT.date(),
+                    _date.today() - _timedelta(days=90),
+                )
 
                 event_rows = (
-                    session.query(Event.id, Event.name, Event.date)
+                    session.query(Event.id, Event.name, Event.date, Event.status)
                     .filter(
                         Event.date.isnot(None),
                         Event.date >= date_floor,
@@ -268,12 +277,14 @@ async def tapology_hook_for_event_names(
                     _report(0, 0, "no recent events in DB")
                     return summary
 
-                # Incremental skip: filter out events whose every fight already
-                # has recent picks. The expensive web work (Tapology resolve +
-                # matchup scrape) is what we want to avoid; repo.upsert already
-                # has a per-row recency check, but reaching it requires the full
-                # scrape. Pre-filter here so we hit Tapology only for events
-                # that actually need it.
+                # Incremental skip: the expensive web work (Tapology resolve +
+                # matchup scrape) is what we want to avoid, so only hit
+                # Tapology for events that actually need it.
+                #  - Completed events: picks scraped at/after the event date
+                #    are the final snapshot — covered forever. Re-queue only
+                #    gaps or pre-event snapshots.
+                #  - Upcoming events: picks keep moving until fight night, so
+                #    refresh whenever they're older than the recency window.
                 repo = TapologyPicksRepo(session)
                 pending_events: list = []
                 skipped_recent = 0
@@ -287,10 +298,14 @@ async def tapology_hook_for_event_names(
                         # Event has no fights yet → nothing to attach picks to;
                         # skip but don't count as recent (truly nothing to do).
                         continue
-                    if repo.all_recent(fight_ids):
+                    if row.status == "completed":
+                        covered = repo.all_scraped_after(fight_ids, row.date)
+                    else:
+                        covered = repo.all_recent(fight_ids)
+                    if covered:
                         skipped_recent += 1
                         continue
-                    pending_events.append(row)
+                    pending_events.append((row.id, row.name, row.date))
 
                 summary["skipped_recent"] = skipped_recent
                 summary["candidates"] = len(event_rows)
@@ -310,7 +325,7 @@ async def tapology_hook_for_event_names(
                 )
 
                 fighter_m, fight_m, _ = build_matchers(
-                    session, restrict_event_ids={r.id for r in pending_events}
+                    session, restrict_event_ids={eid for eid, _, _ in pending_events}
                 )
 
                 event_failures = 0
